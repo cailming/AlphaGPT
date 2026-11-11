@@ -109,7 +109,8 @@ class AShareDailyLoader:
 
     def load(self, start: date, end: date, stock_codes: list[str] | None = None,
              warmup_calendar_days: int = 150,
-             label_lookahead_calendar_days: int = 30) -> pd.DataFrame:
+             label_lookahead_calendar_days: int = 30,
+             include_warmup: bool = False) -> pd.DataFrame:
         if end < start or warmup_calendar_days < 0 or label_lookahead_calendar_days < 0:
             raise ValueError("Invalid date range / warmup days")
         if stock_codes is not None and not stock_codes:
@@ -140,4 +141,6 @@ class AShareDailyLoader:
         if raw.empty:
             return raw
         result = make_daily_features(raw)
+        if include_warmup:
+            return result.loc[result["trade_date"] <= pd.Timestamp(end)].reset_index(drop=True)
         return result.loc[result["trade_date"].between(pd.Timestamp(start), pd.Timestamp(end))].reset_index(drop=True)
