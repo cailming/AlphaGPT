@@ -1,5 +1,8 @@
 """Pure-data tests; do not require a live database or network."""
 import unittest
+from datetime import date
+
+from sqlalchemy import create_engine
 
 import numpy as np
 import pandas as pd
@@ -39,6 +42,35 @@ class DailyTests(unittest.TestCase):
         source = self.sample()
         with self.assertRaises(ValueError):
             make_daily_features(pd.concat([source, source.iloc[[0]]]))
+
+
+
+class LoaderTests(unittest.TestCase):
+    def test_loader_keeps_future_rows_for_label_only(self):
+        engine = create_engine("sqlite+pysqlite:///:memory:")
+        with engine.begin() as conn:
+            conn.exec_driver_sql("ATTACH DATABASE ':memory:' AS public")
+            conn.exec_driver_sql('''CREATE TABLE public.market (
+                stock_code TEXT, trade_date DATE, open REAL, high REAL,
+                low REAL, close REAL, volume REAL, amount REAL, "MA_20" REAL
+            )''')
+            conn.exec_driver_sql('''CREATE TABLE public.stock_main_force_daily (
+                stock_code TEXT, trade_date DATE, main_force_score REAL,
+                activity_score REAL, strength_score REAL, holding_score REAL,
+                distribution_risk REAL, amount_ratio_5_20 REAL,
+                drawdown_20_pct REAL, created_at TEXT
+            )''')
+            for d, o in [("2026-11-09", 10), ("2026-11-10", 11),
+                         ("2026-11-11", 12)]:
+                conn.exec_driver_sql('''INSERT INTO public.market VALUES (
+                    ?, ?, ?, ?, ?, ?, 100, 1000, 10
+                )''', ("000001", d, o, o + 1, o - 1, o))
+        from ashare.daily import AShareDailyLoader
+        frame = AShareDailyLoader(engine=engine).load(
+            date(2026, 11, 9), date(2026, 11, 9),
+            warmup_calendar_days=0, label_lookahead_calendar_days=7)
+        self.assertEqual(len(frame), 1)
+        self.assertAlmostEqual(frame.iloc[0]["target_next_open_1d"], 12 / 11 - 1)
 
 
 class MinuteTests(unittest.TestCase):

@@ -108,8 +108,9 @@ class AShareDailyLoader:
         self.engine = engine if engine is not None else create_engine(_database_url())
 
     def load(self, start: date, end: date, stock_codes: list[str] | None = None,
-             warmup_calendar_days: int = 150) -> pd.DataFrame:
-        if end < start or warmup_calendar_days < 0:
+             warmup_calendar_days: int = 150,
+             label_lookahead_calendar_days: int = 30) -> pd.DataFrame:
+        if end < start or warmup_calendar_days < 0 or label_lookahead_calendar_days < 0:
             raise ValueError("Invalid date range / warmup days")
         if stock_codes is not None and not stock_codes:
             raise ValueError("stock_codes cannot be empty")
@@ -124,11 +125,11 @@ class AShareDailyLoader:
             FROM public.market AS m
             LEFT JOIN public.stock_main_force_daily AS f
               ON f.stock_code = m.stock_code AND f.trade_date = m.trade_date
-            WHERE m.trade_date BETWEEN :fetch_start AND :end_date
+            WHERE m.trade_date BETWEEN :fetch_start AND :fetch_end
               AND m.stock_code IS NOT NULL
         """
         params: dict = {"fetch_start": start - timedelta(days=warmup_calendar_days),
-                        "end_date": end}
+                        "fetch_end": end + timedelta(days=label_lookahead_calendar_days)}
         query = text(sql)
         if stock_codes is not None:
             query = text(sql + " AND m.stock_code IN :stock_codes")

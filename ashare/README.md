@@ -35,7 +35,8 @@ python -m ashare.inspect minute 2026-11-11 2026-11-11 --codes 000001 --include-t
 ```
 
 No DB data is created or modified. AShareDailyLoader.load uses a 150-calendar-
-day warmup for 20-bar lookbacks and returns only requested dates. If fewer
+day warmup for 20-bar lookbacks, also fetches 30 future calendar days
+for labels (never as features), and returns only requested dates. If fewer
 than 20 valid historical trading rows exist, some factors remain NaN. It joins
 main-force rows even if their historic availability is uncertain: **DO NOT**
 claim point-in-time backtest validity until score-generation timestamps and
