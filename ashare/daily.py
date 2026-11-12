@@ -126,7 +126,8 @@ class AShareDailyLoader:
                    f.main_force_score, f.activity_score, f.strength_score,
                    f.holding_score, f.distribution_risk,
                    f.amount_ratio_5_20, f.drawdown_20_pct,
-                   f.created_at AS main_force_created_at
+                   f.created_at AS main_force_created_at,
+                   f.stock_code AS main_force_joined_code
             FROM public.market AS m
             LEFT JOIN public.stock_main_force_daily AS f
               ON f.stock_code = m.stock_code AND f.trade_date = m.trade_date

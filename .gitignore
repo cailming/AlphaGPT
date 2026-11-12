@@ -56,3 +56,6 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local A-share research reports (do not commit market data)
+reports/
