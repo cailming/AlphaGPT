@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, timedelta
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -110,11 +110,15 @@ class AShareDailyLoader:
     def load(self, start: date, end: date, stock_codes: list[str] | None = None,
              warmup_calendar_days: int = 150,
              label_lookahead_calendar_days: int = 30,
-             include_warmup: bool = False) -> pd.DataFrame:
+             include_warmup: bool = False,
+             progress: Callable[[str], None] | None = None,
+             chunksize: int = 50000) -> pd.DataFrame:
         if end < start or warmup_calendar_days < 0 or label_lookahead_calendar_days < 0:
             raise ValueError("Invalid date range / warmup days")
         if stock_codes is not None and not stock_codes:
             raise ValueError("stock_codes cannot be empty")
+        if chunksize < 1:
+            raise ValueError("chunksize must be positive")
         # Prehistory before requested start is needed for past-only rolling windows.
         sql = """
             SELECT m.stock_code, m.trade_date, m.open, m.high, m.low,
@@ -136,11 +140,31 @@ class AShareDailyLoader:
             query = text(sql + " AND m.stock_code IN :stock_codes")
             query = query.bindparams(bindparam("stock_codes", expanding=True))
             params["stock_codes"] = stock_codes
+        # Stream the SELECT in chunks so a long full-market query reports
+        # real fetched-row counts without executing a separate COUNT(*).
+        if progress is not None:
+            progress("SQL 查询已启动，正在等待 PostgreSQL 返回首批数据...")
+        chunks = []
+        row_count = 0
         with self.engine.connect() as connection:
-            raw = pd.read_sql_query(query, connection, params=params)
+            streaming = connection.execution_options(stream_results=True)
+            for part in pd.read_sql_query(
+                query, streaming, params=params, chunksize=chunksize
+            ):
+                chunks.append(part)
+                row_count += len(part)
+                if progress is not None:
+                    progress(f"已读取 {row_count:,} 行行情（每批最多 {chunksize:,} 行）")
+        raw = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
         if raw.empty:
+            if progress is not None:
+                progress("查询完成：0 行")
             return raw
+        if progress is not None:
+            progress(f"共获取 {row_count:,} 行；开始计算日线因子与收益标签...")
         result = make_daily_features(raw)
+        if progress is not None:
+            progress(f"因子计算完成：{len(result):,} 行")
         if include_warmup:
             return result.loc[result["trade_date"] <= pd.Timestamp(end)].reset_index(drop=True)
         return result.loc[result["trade_date"].between(pd.Timestamp(start), pd.Timestamp(end))].reset_index(drop=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 import random
+from typing import Callable
 
 import numpy as np
 import pandas as pd
@@ -57,8 +58,12 @@ def cross_sectional_ic(values, valid, data: DailyFactorTensor, *,
 
 
 def search_baseline(data: DailyFactorTensor, *, start: date, end: date,
-                    samples=100, seed=42, min_stocks=15, min_train_days=10):
+                    samples=100, seed=42, min_stocks=15, min_train_days=10,
+                    progress: Callable[[int, int, int, int, float], None] | None = None,
+                    progress_every: int = 10):
     """Select by train IC only; return holdout test diagnostics (no trade fills)."""
+    if samples < 1 or progress_every < 1:
+        raise ValueError("samples and progress_every must be positive")
     days = data.dates[(data.dates >= pd.Timestamp(start)) &
                       (data.dates <= pd.Timestamp(end))]
     if len(days) < 12:
@@ -71,16 +76,20 @@ def search_baseline(data: DailyFactorTensor, *, start: date, end: date,
     rng = random.Random(seed)
     candidates = set()
     reports = []
-    for _ in range(samples):
+    for attempt in range(1, samples + 1):
         tokens = engine.sample(rng)
-        if tokens in candidates:
-            continue
-        candidates.add(tokens)
-        values, valid = engine.execute(tokens, data)
-        train = cross_sectional_ic(values, valid, data,
-                                   allowed_dates=train_days, min_stocks=min_stocks)
-        if train.dates >= min_train_days and np.isfinite(train.mean_ic):
-            reports.append((train.mean_ic, tokens, train))
+        if tokens not in candidates:
+            candidates.add(tokens)
+            values, valid = engine.execute(tokens, data)
+            train = cross_sectional_ic(values, valid, data,
+                                       allowed_dates=train_days, min_stocks=min_stocks)
+            if train.dates >= min_train_days and np.isfinite(train.mean_ic):
+                reports.append((train.mean_ic, tokens, train))
+        if progress is not None and (
+            attempt == 1 or attempt % progress_every == 0 or attempt == samples
+        ):
+            best = max((r[0] for r in reports), default=float("nan"))
+            progress(attempt, samples, len(candidates), len(reports), best)
     if not reports:
         return None
     reports.sort(key=lambda x: x[0], reverse=True)
