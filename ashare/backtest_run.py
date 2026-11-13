@@ -14,6 +14,10 @@ from .backtest import (BacktestConfig, load_formal_market,
 from .st_history import (
     filter_signals_by_historical_st, load_st_snapshots, load_st_coverage,
 )
+from .current_st import (
+    NON_PIT_LABEL, load_current_stock_info, filter_signals_by_current_st,
+)
+from .daily import AShareDailyLoader
 
 
 def main():
@@ -34,12 +38,19 @@ def main():
                    help="CSV certifying dates whose ST daily list is complete")
     p.add_argument("--allow-partial-st-coverage", action="store_true",
                    help="Research-only: incomplete ST dates block ALL signals on those dates")
-    p.add_argument("--out", default="reports/ashare_backtest")
+    p.add_argument("--exclude-current-st", action="store_true",
+                   help="NON-PIT diagnostic: apply TODAY'S stock_info.st/name to all history")
+    p.add_argument("--out", default=None,
+                   help="Output root (current-ST mode defaults to its own root)")
     args = p.parse_args()
     if args.log_every_days < 1 or args.db_chunk_size < 1 or args.candidate_pool < 1:
         p.error("Progress and chunk sizes must be positive")
     if bool(args.st_daily) != bool(args.st_coverage):
         p.error("--st-daily and --st-coverage must be given together")
+    if args.exclude_current_st and args.st_daily:
+        p.error("--exclude-current-st is mutually exclusive with historical --st-daily")
+    if args.allow_partial_st_coverage and not args.st_daily:
+        p.error("--allow-partial-st-coverage requires --st-daily and --st-coverage")
     if not args.exploratory:
         p.error("Historical tradeability dataset not yet integrated; --exploratory "
                 "required for a provisional research run")
@@ -65,7 +76,25 @@ def main():
         (signals.signal_date.dt.date <= args.end)
     ].reset_index(drop=True)
     st_audit = None
-    if args.st_daily is not None:
+    current_st_audit = None
+    current_st_result = None
+    stock_pool_mode = "UNFILTERED_EXPLORATORY"
+    if args.exclude_current_st:
+        progress(
+            "警告：使用当前 stock_info.st 和 stock_name 排除历史股票；"
+            "这是 NON-PIT 诊断实验，存在未来信息泄漏"
+        )
+        info = load_current_stock_info(AShareDailyLoader().engine)
+        current_st_result = filter_signals_by_current_st(signals, info)
+        current_st_audit = current_st_result.stats
+        signals = current_st_result.signals
+        stock_pool_mode = NON_PIT_LABEL
+        progress(
+            f"当前ST黑名单：允许 {current_st_audit['signal_rows_after']:,}，"
+            f"排除ST {current_st_audit['blocked_current_st_signals']:,}，"
+            f"未知状态排除 {current_st_audit['blocked_unknown_signals']:,}"
+        )
+    elif args.st_daily is not None:
         progress("读取历史 ST 列表及每日完整性证明（当前 stock_info.st 禁止作为历史依据）")
         st_result = filter_signals_by_historical_st(
             signals,
@@ -82,6 +111,7 @@ def main():
                 "--allow-partial-st-coverage for a noncomparable diagnostic run."
             )
         signals = st_result.signals
+        stock_pool_mode = "HISTORICAL_ST_DIAGNOSTIC"
         progress(
             f"历史ST信号日过滤：允许 {st_audit['eligible_normal_rows']:,}，"
             f"ST排除 {st_audit['blocked_st_rows']:,}，"
@@ -95,7 +125,20 @@ def main():
     result.metrics["historical_st_filter"] = (
         st_audit if st_audit is not None else {"status": "NOT_APPLIED"}
     )
-    out = Path(args.out) / f"{args.start}_{args.end}"
+    result.metrics["stock_pool_mode"] = stock_pool_mode
+    result.metrics["current_st_filter"] = (
+        current_st_audit if current_st_audit is not None
+        else {"status": "NOT_APPLIED"}
+    )
+    result.metrics["is_point_in_time_stock_pool"] = (
+        False if args.exclude_current_st else None
+    )
+    result.metrics["audited_total_return_available"] = False
+    root = args.out or (
+        "reports/ashare_backtest_current_st" if args.exclude_current_st
+        else "reports/ashare_backtest"
+    )
+    out = Path(root) / f"{args.start}_{args.end}"
     out.mkdir(parents=True, exist_ok=True)
     result.equity.to_csv(out / "daily_equity.csv", index=False, encoding="utf-8-sig")
     result.trades.to_csv(out / "simulated_trades.csv", index=False, encoding="utf-8-sig")
@@ -104,6 +147,11 @@ def main():
     if st_audit is not None:
         st_result.per_day.to_csv(out / "st_filter_by_day.csv",
                                  index=False, encoding="utf-8-sig")
+    if current_st_result is not None:
+        current_st_result.audit.to_csv(
+            out / "current_st_universe_audit.csv", index=False,
+            encoding="utf-8-sig"
+        )
     (out / "summary.json").write_text(
         json.dumps(result.metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     if not result.metrics["last_day_valuation_fresh"]:
