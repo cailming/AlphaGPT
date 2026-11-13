@@ -129,7 +129,9 @@ def _money_cost(value: float, config: BacktestConfig, side: str) -> float:
 
 def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
                  config: BacktestConfig,
-                 *, tradeability: pd.DataFrame | None = None) -> BacktestResult:
+                 *, tradeability: pd.DataFrame | None = None,
+                 progress: Callable[[str], None] | None = None,
+                 progress_every: int = 20) -> BacktestResult:
     """Daily-event simulation; exit attempts start on the next session.
 
     A missing bar means no fill and last valid close is used as a STALE mark.
@@ -141,6 +143,8 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
         raise ValueError(f"Missing market columns: {sorted(missing)}")
     if tradeability is None and not config.allow_unverified_tradeability:
         raise ValueError("Verified historical tradeability required; pass explicit exploratory opt-in")
+    if progress_every < 1:
+        raise ValueError("progress_every must be positive")
     sig_cols = {"stock_code", "signal_date", "score"}
     if missing := sig_cols - set(signals.columns):
         raise ValueError(f"Missing signal columns: {sorted(missing)}")
@@ -196,7 +200,7 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
             row["can_sell"] is True or row["can_sell"] == True
         )
 
-    for day, daybars in bars.groupby("trade_date", sort=True):
+    for day_idx, (day, daybars) in enumerate(bars.groupby("trade_date", sort=True), start=1):
         current = daybars.set_index("stock_code")
         def open_price(code):
             if code not in current.index:
@@ -288,6 +292,11 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
                                 equity=round(cash + value, 2),
                                 positions=len(positions), stale_positions=stale))
         previous_day = day
+        if progress is not None and (
+            day_idx == 1 or day_idx % progress_every == 0 or day_idx == len(market_days)
+        ):
+            progress(f"回测交易日 {day_idx}/{len(market_days)}，"
+                     f"持仓 {len(positions)} 只，模拟成交 {len(ledger)} 笔")
 
     nav = pd.DataFrame(equity_rows)
     nav["daily_return"] = nav.equity.pct_change().fillna(nav.equity / config.initial_cash - 1)

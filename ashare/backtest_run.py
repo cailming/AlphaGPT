@@ -21,8 +21,12 @@ def main():
     p.add_argument("--db-chunk-size", type=int, default=50000)
     p.add_argument("--exploratory", action="store_true",
                    help="Explicitly accept missing historical ST/limit/corporate-action checks")
+    p.add_argument("--log-every-days", type=int, default=20,
+                   help="每多少个回测交易日打印一次进度")
     p.add_argument("--out", default="reports/ashare_backtest")
     args = p.parse_args()
+    if args.log_every_days < 1 or args.db_chunk_size < 1:
+        p.error("Progress and chunk sizes must be positive")
     if not args.exploratory:
         p.error("Historical tradeability dataset not yet integrated; --exploratory "
                 "required for a provisional research run")
@@ -40,7 +44,8 @@ def main():
     progress(f"[2/3] 生成 NEG(ma20_dev) 收盘信号：股票 {market.stock_code.nunique():,} 只")
     signals = make_ma20_reversion_signals(market)
     progress(f"[3/3] 模拟 T+1 买入、最早 T+2 卖出（探索性、非成交记录）")
-    result = run_backtest(market, signals, cfg)
+    result = run_backtest(market, signals, cfg,
+                          progress=progress, progress_every=args.log_every_days)
     out = Path(args.out) / f"{args.start}_{args.end}"
     out.mkdir(parents=True, exist_ok=True)
     result.equity.to_csv(out / "daily_equity.csv", index=False, encoding="utf-8-sig")
