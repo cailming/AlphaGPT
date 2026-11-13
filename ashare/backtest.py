@@ -1,4 +1,4 @@
-"""P3.1 experimental A-share T-close signal -> T+1 open entry -> later open exit.
+"""P3.2 diagnostic A-share T-close signal -> T+1 open entry -> later open exit.
 
 NO live trading. NO historical corporate actions/ST/limit prices inferred.
 A run without verified per-stock/day tradability requires explicit opt-in and
@@ -31,12 +31,15 @@ class BacktestConfig:
     transfer_rate: float = 0.00001
     slippage_bps: float = 5.0
     allow_unverified_tradeability: bool = False
+    candidate_pool_size: int = 20    # preselected at T close, not full-market order attempts
 
     def __post_init__(self):
         if self.end < self.start or self.initial_cash <= 0:
             raise ValueError("Invalid backtest dates or cash")
         if self.max_positions < 1 or self.lot_size < 1:
             raise ValueError("Invalid position/lot settings")
+        if self.candidate_pool_size < 1:
+            raise ValueError("candidate_pool_size must be positive")
         if any(x < 0 for x in (self.commission_rate, self.min_commission,
                               self.stamp_rate_sell, self.transfer_rate,
                               self.slippage_bps)):
@@ -49,6 +52,7 @@ class BacktestResult:
     trades: pd.DataFrame
     rejected: pd.DataFrame
     metrics: dict
+    open_positions: pd.DataFrame
 
 
 def load_formal_market(start: date, end: date, *, stock_codes=None,
@@ -184,7 +188,10 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
     cash = float(config.initial_cash)
     positions = {}  # stock_code -> {shares, opened, signal_date, cost_basis}
     last_close = {}
+    last_mark_session = {}
     ledger, rejected, equity_rows = [], [], []
+    peak_stale_sessions = 0
+    total_stale_session_days = 0
     previous_day = None
     slip = config.slippage_bps / 10000.0
     unknown = tradeability is None
@@ -196,9 +203,9 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
             row = eligible.loc[(day, code)]
         except KeyError:
             return False
-        return row["can_buy"] is True or row["can_buy"] == True if side == "buy" else (
-            row["can_sell"] is True or row["can_sell"] == True
-        )
+        value = row["can_buy"] if side == "buy" else row["can_sell"]
+        # Reject missing, strings and other unverifiable status values.
+        return isinstance(value, (bool, np.bool_)) and bool(value)
 
     for day_idx, (day, daybars) in enumerate(bars.groupby("trade_date", sort=True), start=1):
         current = daybars.set_index("stock_code")
@@ -237,7 +244,10 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
         # Today's signals cannot execute until NEXT session.
         prior = sig_by_day.get(previous_day)
         if prior is not None:
-            for rec in prior.itertuples(index=False):
+            # Fixed shortlist decided at T close. Do NOT sweep thousands of
+            # stocks just because a limited portfolio has no buying power.
+            shortlist = prior.head(config.candidate_pool_size)
+            for rec in shortlist.itertuples(index=False):
                 if len(positions) >= config.max_positions:
                     break
                 code = rec.stock_code
@@ -266,7 +276,9 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
                     rejected.append(dict(date=day.date().isoformat(),
                                          stock_code=code, side="buy",
                                          reason="INSUFFICIENT_CASH"))
-                    continue
+                    # One exhausted allocation ends today's buys; don't scan
+                    # the remaining candidates for a cheaper artificial fill.
+                    break
                 value = fill * shares
                 fees = _money_cost(value, config, "buy")
                 cash -= value + fees
@@ -284,23 +296,67 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
             close = float(record["close"]) if pd.notna(record["close"]) else float("nan")
             if math.isfinite(close) and close > 0:
                 last_close[code] = close
-        stale = sum(code not in current.index for code in positions)
-        value = sum(pos["shares"] * last_close.get(code, pos["entry_price"])
-                    for code, pos in positions.items())
+                last_mark_session[code] = day_idx
+
+        stale = 0
+        max_stale = 0
+        stale_value = 0.0
+        value = 0.0
+        for code, pos in positions.items():
+            mark = last_close.get(code, pos["entry_price"])
+            position_value = pos["shares"] * mark
+            value += position_value
+            age = day_idx - last_mark_session.get(code, day_idx - 1)
+            if age > 0:
+                stale += 1
+                stale_value += position_value
+                max_stale = max(max_stale, age)
+        peak_stale_sessions = max(peak_stale_sessions, max_stale)
+        total_stale_session_days += int(stale > 0)
         equity_rows.append(dict(trade_date=day.date().isoformat(),
                                 cash=round(cash, 2), holdings_value=round(value, 2),
                                 equity=round(cash + value, 2),
-                                positions=len(positions), stale_positions=stale))
+                                positions=len(positions), stale_positions=stale,
+                                stale_value=round(stale_value, 2),
+                                max_stale_sessions=max_stale,
+                                valuation_fresh=(stale == 0)))
         previous_day = day
         if progress is not None and (
             day_idx == 1 or day_idx % progress_every == 0 or day_idx == len(market_days)
         ):
             progress(f"回测交易日 {day_idx}/{len(market_days)}，"
-                     f"持仓 {len(positions)} 只，模拟成交 {len(ledger)} 笔")
+                     f"持仓 {len(positions)} 只，过期估值 {stale} 只，"
+                     f"模拟成交 {len(ledger)} 笔")
 
     nav = pd.DataFrame(equity_rows)
     nav["daily_return"] = nav.equity.pct_change().fillna(nav.equity / config.initial_cash - 1)
     nav["drawdown"] = nav.equity / nav.equity.cummax().clip(lower=config.initial_cash) - 1
+    open_positions_rows = []
+    for code, pos in sorted(positions.items()):
+        recent_mark_idx = last_mark_session.get(code)
+        stale_sessions = (len(market_days) - recent_mark_idx
+                          if recent_mark_idx is not None else len(market_days))
+        open_positions_rows.append({
+            "stock_code": code, "shares": pos["shares"],
+            "entry_date": pos["opened"].date().isoformat(),
+            "entry_price": pos["entry_price"],
+            "last_known_close": last_close.get(code),
+            "last_mark_date": (market_days[recent_mark_idx - 1].date().isoformat()
+                               if recent_mark_idx is not None else None),
+            "stale_sessions": stale_sessions,
+            "indicative_value": pos["shares"] * last_close.get(
+                code, pos["entry_price"]),
+        })
+    last_trade_date = ledger[-1]["date"] if ledger else None
+    fees_total = sum(float(rec["fees"]) for rec in ledger)
+    rejection_counts = {}
+    for item in rejected:
+        key = item["side"] + ":" + item["reason"]
+        rejection_counts[key] = rejection_counts.get(key, 0) + 1
+    stale_days = int((nav["stale_positions"] > 0).sum())
+    all_stale_days = int(((nav["stale_positions"] == nav["positions"])
+                          & (nav["positions"] > 0)).sum())
+    last_day_unfresh = bool(nav.iloc[-1]["stale_positions"] > 0)
     metrics = {
         "start": config.start.isoformat(), "end": config.end.isoformat(),
         "initial_cash": config.initial_cash,
@@ -310,6 +366,22 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
         "trade_count": len(ledger),
         "unclosed_positions": len(positions),
         "rejected_attempts": len(rejected),
+        "candidate_pool_size": config.candidate_pool_size,
+        "fees_assumed_total": round(fees_total, 2),
+        "last_simulated_trade_date": last_trade_date,
+        "days_with_stale_marks": stale_days,
+        "days_all_positions_stale": all_stale_days,
+        "max_stale_sessions": peak_stale_sessions,
+        "end_stale_positions": int(nav.iloc[-1]["stale_positions"]),
+        "end_stale_value": float(nav.iloc[-1]["stale_value"]),
+        "end_stale_value_share": (
+            float(nav.iloc[-1]["stale_value"] / nav.iloc[-1]["equity"])
+            if float(nav.iloc[-1]["equity"]) > 0 else None
+        ),
+        "rejected_by_reason": rejection_counts,
+        "last_day_valuation_fresh": not last_day_unfresh,
+        "indicative_nav_only": True,
+        "audited_total_return_available": False,
         "tradeability_mode": ("UNVERIFIED_EXPLORATORY" if unknown
                               else "EXPLICIT_HISTORICAL_TRADEABILITY"),
         "corporate_action_adjustment": "NOT_MODELED",
@@ -320,4 +392,10 @@ def run_backtest(market: pd.DataFrame, signals: pd.DataFrame,
             "intraday liquidity are not fully modeled. This is NOT audited PnL."
         ),
     }
-    return BacktestResult(nav, pd.DataFrame(ledger), pd.DataFrame(rejected), metrics)
+    return BacktestResult(nav, pd.DataFrame(ledger),
+                          pd.DataFrame(rejected), metrics,
+                          pd.DataFrame(open_positions_rows, columns=[
+                              "stock_code", "shares", "entry_date",
+                              "entry_price", "last_known_close", "last_mark_date",
+                              "stale_sessions", "indicative_value",
+                          ]))

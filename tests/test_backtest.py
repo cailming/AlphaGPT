@@ -127,5 +127,68 @@ class BacktestTests(unittest.TestCase):
         self.assertEqual(result.stock_code.tolist(), ["000001"])
 
 
+
+class BacktestAuditTests(unittest.TestCase):
+    def test_candidate_pool_and_exhausted_cash_do_not_scan_all_stocks(self):
+        rows = []
+        sigs = []
+        for i in range(30):
+            code = f"{i:06d}"
+            rows.extend([(code, "2025-03-03", 1000, 1000),
+                         (code, "2025-03-04", 1000, 1000)])
+            sigs.append((code, "2025-03-03", 30 - i))
+        cfg = BacktestConfig(date(2025, 3, 3), date(2025, 3, 4),
+                             initial_cash=1000, max_positions=1,
+                             candidate_pool_size=2,
+                             allow_unverified_tradeability=True)
+        out = run_backtest(bars(rows), signals(*sigs), cfg)
+        self.assertEqual(out.metrics["candidate_pool_size"], 2)
+        self.assertEqual(out.metrics["rejected_attempts"], 1)
+        self.assertEqual(out.rejected.iloc[0].reason, "INSUFFICIENT_CASH")
+        self.assertEqual(out.metrics["trade_count"], 0)
+
+    def test_stale_positions_report_and_nav_quality(self):
+        m = bars([
+            ("000001", "2025-03-03", 10, 10),
+            ("000001", "2025-03-04", 10, 11),
+            ("600000", "2025-03-05", 20, 20),
+            ("600000", "2025-03-06", 20, 20),
+        ])
+        out = run_backtest(m, signals(("000001", "2025-03-03", 1)), config())
+        self.assertEqual(out.metrics["unclosed_positions"], 1)
+        self.assertFalse(out.metrics["audited_total_return_available"])
+        self.assertFalse(out.metrics["last_day_valuation_fresh"])
+        self.assertEqual(out.metrics["days_with_stale_marks"], 2)
+        self.assertEqual(out.metrics["end_stale_positions"], 1)
+        self.assertEqual(out.metrics["max_stale_sessions"], 2)
+        self.assertEqual(out.open_positions.iloc[0].stale_sessions, 2)
+        self.assertEqual(out.open_positions.iloc[0].last_mark_date, "2025-03-04")
+        self.assertFalse(out.equity.iloc[-1].valuation_fresh)
+
+    def test_invalid_tradeability_type_fails_closed(self):
+        m = bars([
+            ("000001", "2025-03-03", 10, 10),
+            ("000001", "2025-03-04", 10, 10),
+        ])
+        t = pd.DataFrame([
+            ("000001", "2025-03-04", "True", "True"),
+        ], columns=["stock_code", "trade_date", "can_buy", "can_sell"])
+        out = run_backtest(m, signals(("000001", "2025-03-03", 1)),
+                           config(allow=False), tradeability=t)
+        self.assertEqual(out.metrics["trade_count"], 0)
+        self.assertEqual(out.metrics["rejected_attempts"], 1)
+
+    def test_backtest_outputs_expose_fee_and_last_trade(self):
+        m = bars([
+            ("000001", "2025-03-03", 10, 10),
+            ("000001", "2025-03-04", 10, 10),
+            ("000001", "2025-03-05", 11, 11),
+        ])
+        out = run_backtest(m, signals(("000001", "2025-03-03", 1)), config())
+        self.assertEqual(out.metrics["last_simulated_trade_date"], "2025-03-05")
+        self.assertAlmostEqual(out.metrics["fees_assumed_total"],
+                               round(float(out.trades.fees.sum()), 2))
+
+
 if __name__ == "__main__":
     unittest.main()

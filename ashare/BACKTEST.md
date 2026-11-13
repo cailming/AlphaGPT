@@ -69,3 +69,38 @@ cash/share treatment, historical ST status and price-limit levels, true
 suspension/nontradable dates, and if possible opening auction tradability
 / minute bars. The stock_scripts daily OHLC source does not provide
 reliable opening auction fill probabilities.
+
+## P3.2 audit hardening — 2026-11-13
+
+The uploaded first run (Google Drive `agu/alphagpt/2025-03-01_2026-09-30`)
+showed 4,819 fill rows, 326,561 rejected attempts, 9 unclosed holdings and
+54 consecutive final trading days where ALL holdings had stale marks.
+Of the 326,561 attempts, 325,060 were INSUFFICIENT_CASH. The indicative
+-44.26% return was NOT a validated PnL measurement.
+
+This version:
+- fixes the full-universe scan on cash exhaustion: T-date's ranked candidate
+  shortlist is fixed to `--candidate-pool 20` (tunable), and the first
+  unaffordable buy stops further buy attempts that morning;
+- reports stale position age in observed trading sessions, total days with
+  stale marks, and whether period-end values are fresh;
+- adds `open_positions.csv` with each held symbol, entry, last marked
+  price/date and estimated stale session count;
+- adds `candidate_pool_size`, `last_simulated_trade_date`,
+  `fees_assumed_total`, stale-valuation metrics and mandatory
+  `audited_total_return_available: false` to summary.json;
+- does not claim that proxy fills are actual tradable fills; no changes
+  to PostgreSQL or Solana execution logic.
+
+Run:
+
+    python -u -m ashare.backtest_run --start 2025-03-01 \
+      --end 2026-09-30 --exploratory --candidate-pool 20 --log-every-days 20
+
+The old and new indicative outcomes will differ because the historical
+selection/execution policy has changed; comparisons of PnL between versions
+are not meaningful strategy-performance improvements.
+
+Remaining P3.3 gates: corporate-action history, historical ST and daily
+limit prices, explicit suspension eligibility, and price-at-open queue/depth.
+Do not train GPU reward models from unverified daily-open proxy fills.

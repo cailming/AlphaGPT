@@ -1,4 +1,4 @@
-"""P3.1 baseline exploratory daily backtest; never places real orders.
+"""P3.2 exploratory daily backtest with stale-NAV and candidate audit; no real orders.
 
 python -u -m ashare.backtest_run --start 2025-03-01 --end 2026-09-30 --exploratory
 """
@@ -14,23 +14,27 @@ from .backtest import (BacktestConfig, load_formal_market,
 
 
 def main():
-    p = argparse.ArgumentParser(description="P3.1 A-share exploratory open-fill backtest")
+    p = argparse.ArgumentParser(description="P3.2 diagnostic A-share open-fill simulation")
     p.add_argument("--start", type=date.fromisoformat, default=date(2025, 3, 1))
     p.add_argument("--end", type=date.fromisoformat, required=True)
     p.add_argument("--codes", help="Comma-separated stock codes")
     p.add_argument("--db-chunk-size", type=int, default=50000)
+    p.add_argument("--candidate-pool", type=int, default=20,
+                   help="T日收盘排序后保留前N只候选股票；不再遍历全市场买入")
     p.add_argument("--exploratory", action="store_true",
                    help="Explicitly accept missing historical ST/limit/corporate-action checks")
     p.add_argument("--log-every-days", type=int, default=20,
                    help="每多少个回测交易日打印一次进度")
     p.add_argument("--out", default="reports/ashare_backtest")
     args = p.parse_args()
-    if args.log_every_days < 1 or args.db_chunk_size < 1:
+    if args.log_every_days < 1 or args.db_chunk_size < 1 or args.candidate_pool < 1:
         p.error("Progress and chunk sizes must be positive")
     if not args.exploratory:
         p.error("Historical tradeability dataset not yet integrated; --exploratory "
                 "required for a provisional research run")
-    cfg = BacktestConfig(args.start, args.end, allow_unverified_tradeability=True)
+    cfg = BacktestConfig(args.start, args.end,
+                         candidate_pool_size=args.candidate_pool,
+                         allow_unverified_tradeability=True)
 
     def progress(message):
         print(f"[{datetime.now():%H:%M:%S}] {message}", flush=True)
@@ -51,8 +55,11 @@ def main():
     result.equity.to_csv(out / "daily_equity.csv", index=False, encoding="utf-8-sig")
     result.trades.to_csv(out / "simulated_trades.csv", index=False, encoding="utf-8-sig")
     result.rejected.to_csv(out / "rejected_attempts.csv", index=False, encoding="utf-8-sig")
+    result.open_positions.to_csv(out / "open_positions.csv", index=False, encoding="utf-8-sig")
     (out / "summary.json").write_text(
         json.dumps(result.metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+    if not result.metrics["last_day_valuation_fresh"]:
+        progress("警告：期末持仓中存在过期估值；最终收益率不可用于策略业绩判断")
     progress(f"探索性回测完成，输出：{out}")
     print(json.dumps(result.metrics, ensure_ascii=False, indent=2))
 
