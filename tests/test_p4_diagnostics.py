@@ -37,6 +37,10 @@ class P4DiagnosticsTests(unittest.TestCase):
         result, daily, monthly, deciles = evaluate_holdout(frame, top_k=3)
         self.assertEqual(result["evaluated_samples"], 36)
         self.assertEqual(result["evaluated_days"], 3)
+        self.assertAlmostEqual(result["mean_predicted_return_all_samples"],
+                               frame.predicted_return.mean())
+        self.assertAlmostEqual(result["predicted_positive_share_all_samples"],
+                               (frame.predicted_return > 0).mean())
         self.assertAlmostEqual(result["mean_rank_ic"], -1.0)
         self.assertEqual(len(monthly), 1)
         self.assertEqual(int(monthly.iloc[0].test_samples), 36)
