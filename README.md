@@ -135,6 +135,8 @@ python -u -m ashare.p4_pool_report --start 2025-03-01 --end 2026-09-30 \
 
 拒绝原因在 `rejected_by_reason` 中按顺序分配**第一项不合格原因**（互斥、总量守恒）；筛选后因尚无未来连续完整标签而不可训练的记录另以 `selected_without_valid_label` 统计。日/月覆盖会保留无候选股票的交易日，但不推断缺失的全市场交易日历。
 
+**2026-11-14 回归修复**：修复 `outside_daily_top_n` 在 Top-N 截断后错误计算（恒为 0）的问题，改为在截断前记录候选条数，再计算差值。该修复针对 Ubuntu 用户报告的 `test_rejections_partition_requested_window_and_monthly_totals` 断言失败；**提交已完成，须在用户 Ubuntu 上重新执行单测确认结果**。
+
 P4 Ridge MVP：用**同一**股票池规则先训练/测试，再单独推理：
 
 ```bash
