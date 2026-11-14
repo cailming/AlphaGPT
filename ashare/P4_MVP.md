@@ -106,3 +106,58 @@ not a calibrated success probability.
 
 Next: train small Transformer/MLP on the SAME contracts when this Ridge
 baseline and inference are verified. Do not require full-stock coverage.
+
+
+## P4.3-B: Post-hoc Ridge test diagnostics (2026-11-14)
+
+The 2026-06-12..2026-09-30 holdout has **already been inspected**. It is no
+longer untouched for designing or selecting a NEW model; reserve later dates
+for genuinely out-of-sample confirmation. These metrics are neither a
+realistic backtest, PnL, trading fills nor model-calibrated probabilities.
+
+Run this independently of PostgreSQL:
+
+```bash
+cd ~/gcdev/alphagpt/AlphaGPT
+conda activate py312
+git switch ashare-dev && git pull --ff-only origin ashare-dev
+python -m unittest discover -s tests -p 'test_p4_diagnostics.py' -v
+python -u -m ashare.p4_diagnostics \
+  --model-dir reports/ashare_p4_mvp/2025-03-01_2026-09-30 \
+  --top-k 20 --out reports/ashare_p4_diagnostics
+```
+
+Inputs are saved `test_predictions.csv` and `model_metadata.json` only;
+date boundary, row count, stock/date uniqueness and finite values are checked.
+Outputs: `diagnostics.json`, `daily_diagnostics.csv`,
+`monthly_diagnostics.csv` and `score_deciles.csv`
+(decile 0 denotes highest predicted scores).
+Day-over-day Top-K name replacement is NOT executable portfolio turnover;
+five-session labels overlap, and all prices are unadjusted.
+
+**Observed from uploaded model outputs (61,521 rows, 77 dates):**
+
+| Month | Ridge Rank IC | Top-20 minus pool, mean forward label |
+|---|---:|---:|
+| 2026-06 | -0.02261 | -0.00127 |
+| 2026-07 | -0.01650 | -0.00762 |
+| 2026-08 | -0.01220 | -0.00130 |
+| 2026-09 | -0.03519 | -0.00846 |
+
+Across all rows, 94.66% of Ridge predicted returns were positive while
+only 40.13% of realized five-session labels were positive.
+Mean predicted was +0.3526% vs actual label -1.6861%.
+The daily Top-20 list replaced 88.62% of prior-day names on average;
+this is an indication of score/list instability, not verified trading costs.
+Predicted-score decile 0's positive-label share was 36.79%, vs 43.81%
+for decile 7. Ridge mean Rank IC -0.0214, simple `NEG(close_ma20_dev)`
+factor mean Rank IC +0.0820 (previously computed on the same test window).
+
+The assistant ran the new diagnostic CLI on those saved rows and its four
+new synthetic unit tests locally. The user Ubuntu full suite and live DB
+were NOT run by the assistant during this update.
+
+**Next:** audit corporate actions/target outliers and training-validation
+factor behavior, then compare conservative light baselines using ONLY
+training/validation folds. A future-date untouched evaluation is required
+before promoting an improved model or proceeding to RTX 3090 Transformer.
