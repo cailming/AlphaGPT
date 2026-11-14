@@ -164,10 +164,12 @@ def main():
     result.metrics["risk_event_overlay"] = (
         event_audit if event_audit is not None else {"status": "NOT_APPLIED"}
     )
-    result.metrics["full_market_risk_history_verified"] = (
-        bool(st_audit is not None
-             and st_audit["complete_signal_days"] == st_audit["signal_days"])
-        if st_audit is not None else False
+    # Declared vendor coverage is NOT an independently verified all-market
+    # risk history. Keep the narrower claim separate and explicit.
+    result.metrics["full_market_risk_history_verified"] = False
+    result.metrics["st_snapshot_signal_day_coverage_claimed"] = (
+        bool(st_audit["complete_signal_days"] == st_audit["signal_days"])
+        if st_audit is not None else None
     )
     result.metrics["current_st_filter"] = (
         current_st_audit if current_st_audit is not None
