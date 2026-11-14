@@ -250,12 +250,23 @@ def build_pool(raw: pd.DataFrame, start: date, end: date,
     # Top-N is applied AFTER all causal quality/liquidity filters.
     for feat in FEATURES:
         df[feat] = df[feat].replace([np.inf, -np.inf], np.nan)
-    mask = (
-        df.trade_date.between(pd.Timestamp(start), pd.Timestamp(end))
-        & df.valid_past & df.close.ge(cfg.min_price)
-        & df.liquidity_20.ge(cfg.min_amount)
-        & pd.Series(np.isfinite(df[list(FEATURES)].to_numpy(dtype=float)).all(axis=1), index=df.index)
+    # First-failure diagnostic counts are mutually exclusive, not extra filters.
+    in_window = df.trade_date.between(pd.Timestamp(start), pd.Timestamp(end))
+    finite_features = pd.Series(
+        np.isfinite(df[list(FEATURES)].to_numpy(dtype=float)).all(axis=1), index=df.index
     )
+    checks = (
+        ("invalid_or_nonconsecutive_history", df.valid_past),
+        ("below_min_price", df.close.ge(cfg.min_price)),
+        ("below_min_liquidity", df.liquidity_20.ge(cfg.min_amount)),
+        ("missing_or_nonfinite_features", finite_features),
+    )
+    mask = in_window.copy()
+    rejected_by_reason = {}
+    for name, passed in checks:
+        passed = passed.fillna(False)
+        rejected_by_reason[name] = int((mask & ~passed).sum())
+        mask &= passed
     qualified = df.loc[mask].copy()
     candidate_rows = len(qualified)
     veto_count = 0
@@ -273,6 +284,8 @@ def build_pool(raw: pd.DataFrame, start: date, end: date,
     cols = ["stock_code", "trade_date", "session_id", "liquidity_rank",
             "close", "liquidity_20", "target_return", "label_end_session", *FEATURES]
     selected = qualified[cols].reset_index(drop=True)
+    rejected_by_reason["known_risk_event"] = veto_count
+    rejected_by_reason["outside_daily_top_n"] = int(len(qualified) - len(selected))
     stats = {
         "pool_mode": "DYNAMIC_CAUSAL_LIQUIDITY_TOP_N",
         "event_guard": "PARTIAL_KNOWN_EVENTS_ONLY" if events is not None else "NOT_APPLIED",
@@ -280,6 +293,9 @@ def build_pool(raw: pd.DataFrame, start: date, end: date,
         "current_st_backfilled": False,
         "selection_is_future_data_free": True,
         "raw_formal_bar_rows": int(len(df)),
+        "requested_window_rows": int(in_window.sum()),
+        "rejected_by_reason": rejected_by_reason,
+        "selected_without_valid_label": int(selected.target_return.isna().sum()),
         "eligible_before_event_veto": int(candidate_rows),
         "blocked_known_risk_event_rows": veto_count,
         "selected_rows": int(len(selected)),
