@@ -9,6 +9,8 @@ from datetime import date, datetime
 import json
 from pathlib import Path
 
+import pandas as pd
+
 from .backtest import (BacktestConfig, load_formal_market,
                        make_ma20_reversion_signals, run_backtest)
 from .st_history import (
@@ -18,6 +20,9 @@ from .current_st import (
     NON_PIT_LABEL, load_current_stock_info, filter_signals_by_current_st,
 )
 from .daily import AShareDailyLoader
+from .risk_events import (
+    MODE as RISK_EVENT_MODE, load_risk_events, filter_signals_by_risk_events,
+)
 
 
 def main():
@@ -40,6 +45,8 @@ def main():
                    help="Research-only: incomplete ST dates block ALL signals on those dates")
     p.add_argument("--exclude-current-st", action="store_true",
                    help="NON-PIT diagnostic: apply TODAY'S stock_info.st/name to all history")
+    p.add_argument("--risk-events", type=Path,
+                   help="PARTIAL time-stamped public-event risk veto (CSV); cannot certify normal stocks")
     p.add_argument("--out", default=None,
                    help="Output root (current-ST mode defaults to its own root)")
     args = p.parse_args()
@@ -119,6 +126,34 @@ def main():
         )
     else:
         progress("警告：未提供历史 ST 列表；本次仅为无 ST 过滤的探索性回测")
+    event_result = None
+    event_audit = None
+    if args.risk_events is not None:
+        market_dates = pd.to_datetime(
+            market.loc[
+                (market["not_billing"] == 1)
+                & pd.to_datetime(market["trade_date"]).between(
+                    pd.Timestamp(args.start), pd.Timestamp(args.end)
+                ),
+                "trade_date",
+            ]
+        ).dt.normalize().drop_duplicates().sort_values().tolist()
+        progress("读取日期可核验的风险公告：仅拦截当时已公开且在T+1生效的事件")
+        event_result = filter_signals_by_risk_events(
+            signals, load_risk_events(args.risk_events), market_dates,
+        )
+        event_audit = event_result.stats
+        signals = event_result.signals
+        if stock_pool_mode == NON_PIT_LABEL:
+            stock_pool_mode = "NON_PIT_CURRENT_ST_PLUS_PARTIAL_EVENT_OVERLAY"
+        elif stock_pool_mode == "HISTORICAL_ST_DIAGNOSTIC":
+            stock_pool_mode = "HISTORICAL_ST_PLUS_PARTIAL_EVENT_OVERLAY"
+        else:
+            stock_pool_mode = RISK_EVENT_MODE
+        progress(
+            f"历史公告覆盖仅为局部证据：禁止新开仓 {event_audit['blocked_unique_signal_rows']:,} 个信号，"
+            f"剩余 {event_audit['signal_rows_after']:,} 个信号的正常历史状态未获证明"
+        )
     progress(f"[3/3] 模拟 T+1 买入、最早 T+2 卖出（探索性、非成交记录）")
     result = run_backtest(market, signals, cfg,
                           progress=progress, progress_every=args.log_every_days)
@@ -126,6 +161,14 @@ def main():
         st_audit if st_audit is not None else {"status": "NOT_APPLIED"}
     )
     result.metrics["stock_pool_mode"] = stock_pool_mode
+    result.metrics["risk_event_overlay"] = (
+        event_audit if event_audit is not None else {"status": "NOT_APPLIED"}
+    )
+    result.metrics["full_market_risk_history_verified"] = (
+        bool(st_audit is not None
+             and st_audit["complete_signal_days"] == st_audit["signal_days"])
+        if st_audit is not None else False
+    )
     result.metrics["current_st_filter"] = (
         current_st_audit if current_st_audit is not None
         else {"status": "NOT_APPLIED"}
@@ -135,8 +178,12 @@ def main():
     )
     result.metrics["audited_total_return_available"] = False
     root = args.out or (
-        "reports/ashare_backtest_current_st" if args.exclude_current_st
-        else "reports/ashare_backtest"
+        "reports/ashare_backtest_current_st_plus_events"
+        if args.exclude_current_st and args.risk_events is not None else
+        "reports/ashare_backtest_partial_risk_events"
+        if args.risk_events is not None else
+        "reports/ashare_backtest_current_st"
+        if args.exclude_current_st else "reports/ashare_backtest"
     )
     out = Path(root) / f"{args.start}_{args.end}"
     out.mkdir(parents=True, exist_ok=True)
@@ -150,6 +197,15 @@ def main():
     if current_st_result is not None:
         current_st_result.audit.to_csv(
             out / "current_st_universe_audit.csv", index=False,
+            encoding="utf-8-sig"
+        )
+    if event_result is not None:
+        event_result.events_audit.to_csv(
+            out / "risk_event_source_audit.csv", index=False,
+            encoding="utf-8-sig"
+        )
+        event_result.blocked_by_day.to_csv(
+            out / "risk_event_blocked_by_day.csv", index=False,
             encoding="utf-8-sig"
         )
     (out / "summary.json").write_text(
