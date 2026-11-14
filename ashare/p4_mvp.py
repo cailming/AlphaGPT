@@ -280,12 +280,15 @@ def build_pool(raw: pd.DataFrame, start: date, end: date,
         ascending=[True, False, True], kind="stable"
     )
     qualified["liquidity_rank"] = qualified.groupby("trade_date").cumcount() + 1
+    # Count discarded eligible rows BEFORE applying the daily Top-N limit.
+    # selected is a column projection, so len(qualified)-len(selected) is always zero.
+    before_top_n = len(qualified)
     qualified = qualified.loc[qualified.liquidity_rank <= cfg.top_n].copy()
     cols = ["stock_code", "trade_date", "session_id", "liquidity_rank",
             "close", "liquidity_20", "target_return", "label_end_session", *FEATURES]
     selected = qualified[cols].reset_index(drop=True)
     rejected_by_reason["known_risk_event"] = veto_count
-    rejected_by_reason["outside_daily_top_n"] = int(len(qualified) - len(selected))
+    rejected_by_reason["outside_daily_top_n"] = int(before_top_n - len(qualified))
     stats = {
         "pool_mode": "DYNAMIC_CAUSAL_LIQUIDITY_TOP_N",
         "event_guard": "PARTIAL_KNOWN_EVENTS_ONLY" if events is not None else "NOT_APPLIED",
