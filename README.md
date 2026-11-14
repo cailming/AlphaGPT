@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | NumPy Ridge 基线、验证集选参、保存/加载、样本外预测、CSV：`ashare/p4_train.py`、`p4_predict.py`、`tests/test_p4_mvp.py` | **已有旧版真实 PostgreSQL 研究输出**，但 Ridge 样本外弱于简单反转因子；Logistic / LightGBM 尚未实现 |
+| P4.3 | Ridge 基线训练/独立推理及已保存预测的事后诊断：`ashare/p4_train.py`、`p4_predict.py`、`p4_diagnostics.py`、`tests/test_p4_diagnostics.py` | **Ridge 旧实测输出已复核，诊断 CLI 和 4 项测试已在本地运行**；效果弱于简单反转因子，Logistic/LightGBM 尚未实现，新模型必须留未来未见样本 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -93,6 +93,22 @@ Google Drive `agu/alphagpt/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.js
 | Top-20 超出同期股票池均值 | -0.51 个百分点 | +0.81 个百分点 |
 
 **解释**：以上是重叠的未来收益标签上的排序诊断，不是可复利/可成交的策略净值。元数据本身也无法证明因果逻辑与统计显著性完全可靠。**Ridge 样本外不优于简单反转因子**；在完成因子、标签及时间稳定性诊断之前，不应把它当作强势 Transformer 基线，更不能用测试集反复调参。该次运行已知公告拦截样本数为 0，并不表示历史 ST 风险完整核查。
+
+### P4.3-B 已完成：Ridge 样本外事后诊断（2026-11-14）
+
+已读取 Google Drive `agu/alphagpt/ashare_p4_mvp/2025-03-01_2026-09-30/` 下的
+`test_predictions.csv` 和 `model_metadata.json`，对 61,521 条预测、77 个交易日执行
+`ashare/p4_diagnostics.py` 诊断，且新增 4 项合成单测在本地通过：
+
+- **预测显著偏乐观**：94.66% 的模型预测收益为正，但实际五交易日标签为正的仅 40.13%；全样本预测均值 +0.3526%，实际标签均值 -1.6861%。
+- **排序结果不稳定**：测试集平均 Rank IC -0.0214，6～9 月各月均为负；每日 Top-20 名单相对上一日平均更换 88.62% 的股票。**这是名单变化率，不是实际成交换手率**。
+- **高分组不占优**：当日预测得分最高十分位（decile 0）未来标签为正的比例 36.79%，而 decile 7 为 43.81%，提示模型排序/校准存在问题。
+- **信息隔离**：这是对已经看过的 2026 年测试集的**事后诊断**。该窗口不能再为新模型选择特征、参数或门槛并声称“全新样本外”；下一模型必须预留更晚未见时期或预先约定 walk-forward 的评价规则。
+
+命令仅读取本地保存的模型预测和元数据，不连接数据库、不训练模型，也不下单。
+输出 `diagnostics.json`、`daily_diagnostics.csv`、
+`monthly_diagnostics.csv` 和 `score_deciles.csv`。
+详见 [ashare/P4_MVP.md](ashare/P4_MVP.md)。这些重叠标签是研究诊断，非策略净值。
 
 ### P4 当前已实现的研究契约
 
@@ -162,6 +178,15 @@ python -u -m ashare.p4_predict \
   --out reports/ashare_p4_predict
 ```
 
+P4.3-B 已保存测试预测的事后诊断（不需要数据库）：
+
+```bash
+python -m unittest discover -s tests -p 'test_p4_diagnostics.py' -v
+python -u -m ashare.p4_diagnostics \
+  --model-dir reports/ashare_p4_mvp/2025-03-01_2026-09-30 \
+  --top-k 20 --out reports/ashare_p4_diagnostics
+```
+
 上述是仓库**现有入口与建议运行命令**。Google Drive 已有先前 P4 Ridge 的真实数据库训练输出，且新增 P4.1 审计 CLI 已由用户在 Ubuntu 对真实 PostgreSQL 执行，上传结果经交叉核验；**新增单元测试修复后是否全部通过，仍需依据 Ubuntu 测试日志确认**。重跑后应以最新 `model_metadata.json` 和审计文件为准，不得把旧指标当作新实现的验证结果。
 
 ### 当前问题与后续优先顺序
@@ -172,4 +197,4 @@ python -u -m ashare.p4_predict \
 - **P4.4**：在 Ridge 真正跑通之后，以**相同样本/时序切分/评价口径**实现 PyTorch 小型 Transformer，CUDA 3090、训练过程日志、checkpoint/恢复、批量 CSV 推理。先做可运行 MVP，再考虑复杂架构。
 - **开发纪律**：仅向 `ashare-dev` 提交，每个阶段配单测，并同步更新此章节、最近结果与提交号；禁止自动改动 `main` 或写入生产行情表。
 
-**最近核查日期**：2026-11-14。P4.1 增加 `ashare/p4_pool_report.py` 与 `tests/test_p4_pool_report.py`，并对 `ashare/p4_mvp.py` 增加拒绝原因统计。**代码已提交，用户已在 Ubuntu 执行真实市场池审计并上传四份文件；本轮独立核验文件内容，但没有直接连接生产 PostgreSQL 重跑 SQL 或重新运行单元测试**。启动本次工作时 `ashare-dev` HEAD 为 [`970151c0d947984a1cb6919d01bfe59b59b7c61d`](https://github.com/cailming/AlphaGPT/commit/970151c0d947984a1cb6919d01bfe59b59b7c61d)（P4 股票池、缺口安全标签、Ridge OOS MVP）；前一个风险事件核查提交为 [`9febe7fc2a3282108096091c5de11d58e4a8c547`](https://github.com/cailming/AlphaGPT/commit/9febe7fc2a3282108096091c5de11d58e4a8c547)。本轮 P4.1 审计相关提交：[`cb9c059`](https://github.com/cailming/AlphaGPT/commit/cb9c059020342a4115ae6df4663b8b9ba67928a7)、[`59b7c01`](https://github.com/cailming/AlphaGPT/commit/59b7c012db1828985e9ac640c7fb645f16f5b6f6)、[`7511ba6`](https://github.com/cailming/AlphaGPT/commit/7511ba6b148054c8d83ed2ed22f1cd8e129dee99)。后续以分支最新 HEAD 为准。
+**最近核查日期**：2026-11-14。本轮新增 `ashare/p4_diagnostics.py` / `tests/test_p4_diagnostics.py`，已在本地运行 4 项新增测试与真实旧测试预测的事后诊断；完整 Ubuntu/真实数据库重跑仍须用户执行。P4.1 增加 `ashare/p4_pool_report.py` 与 `tests/test_p4_pool_report.py`，并对 `ashare/p4_mvp.py` 增加拒绝原因统计。**代码已提交，用户已在 Ubuntu 执行真实市场池审计并上传四份文件；本轮独立核验文件内容，但没有直接连接生产 PostgreSQL 重跑 SQL 或重新运行单元测试**。启动本次工作时 `ashare-dev` HEAD 为 [`970151c0d947984a1cb6919d01bfe59b59b7c61d`](https://github.com/cailming/AlphaGPT/commit/970151c0d947984a1cb6919d01bfe59b59b7c61d)（P4 股票池、缺口安全标签、Ridge OOS MVP）；前一个风险事件核查提交为 [`9febe7fc2a3282108096091c5de11d58e4a8c547`](https://github.com/cailming/AlphaGPT/commit/9febe7fc2a3282108096091c5de11d58e4a8c547)。本轮 P4.1 审计相关提交：[`cb9c059`](https://github.com/cailming/AlphaGPT/commit/cb9c059020342a4115ae6df4663b8b9ba67928a7)、[`59b7c01`](https://github.com/cailming/AlphaGPT/commit/59b7c012db1828985e9ac640c7fb645f16f5b6f6)、[`7511ba6`](https://github.com/cailming/AlphaGPT/commit/7511ba6b148054c8d83ed2ed22f1cd8e129dee99)。后续以分支最新 HEAD 为准。
