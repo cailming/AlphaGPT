@@ -82,6 +82,10 @@ class CurrentSTTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Missing stock_info"):
             filter_signals_by_current_st(raw, info().drop(columns="stock_name"))
         bad = info()
+        # Pandas 2.2+/3.x rejects assigning a string to a float64 column.
+        # Cast before injecting the deliberately malformed ST value so the
+        # test exercises the filter's UNKNOWN/fail-closed behavior.
+        bad["st"] = bad["st"].astype(object)
         bad.loc[bad.stock_code == "000001", "st"] = "?"
         res = filter_signals_by_current_st(raw, bad)
         self.assertEqual(len(res.signals), 0)
