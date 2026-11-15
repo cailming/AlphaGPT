@@ -64,6 +64,11 @@ def _validate_pool(data: pd.DataFrame, calendar: pd.DatetimeIndex) -> pd.DataFra
         raise ValueError("Invalid label end-session index")
     if not np.isfinite(d[list(FEATURE_NAMES)].to_numpy(dtype=float)).all():
         raise ValueError("Nonfinite research features")
+    # An NaN introduced exclusively in excluded holdout rows can upcast the
+    # original label_end_session column from int64 to float64 before slicing.
+    # Normalize the pre-test slice so its output is independent of that
+    # upstream dtype promotion. Nullable Int64 preserves missing labels.
+    d["label_end_session"] = end.astype("Int64")
     return d
 
 
