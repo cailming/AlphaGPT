@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge 基线、事后诊断和训练/验证期独立因子与标签审计：`ashare/p4_train.py`、`p4_diagnostics.py`、`p4_factor_audit.py`、`tests/test_p4_factor_audit.py` | **P4.3-B 和 P4.3-C 真实运行输出均已跨文件核验；发现因子 IC 时变性/标签分布漂移**；新轻量模型尚未开发 |
+| P4.3 | Ridge 基线、事后诊断、训练/验证期因子审计，以及 P4.3-D 价格路径追溯/稳健轻量模型比较：`ashare/p4_light_baselines.py`、`ashare/p4_price_trace.py` | **P4.3-B/C 真实审计已验收；P4.3-D 两个新命令及对应单测已提交、待 Ubuntu 真实运行验证**；没有可宣称独立优胜的新模型 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -180,6 +180,41 @@ python -u -m ashare.p4_factor_audit \
 `label_outliers.csv` 只保存**每个集合绝对涨跌最大的前 200 条**，共 400 条，已核对排序、阈值、分区日期、`label_end_session-session_id=6` 和唯一性。不是全部 8,176 条绝对变动超过 20% 的记录；反复出现的同一股票常涉及重叠的五日标签，**不是 400 个独立公司行为案例**，也不是已确认错价/除权。不能用不复权未来收益当作可执行交易利润。
 
 **验收边界与下一步**：这是审计产物之间及与旧模型元数据的**数据一致性核验通过**，并非重新访问 PostgreSQL 原始数据、验证完整时点风险历史、排除全部公司行为或证明模型有正向预测能力。建议先核查大幅标签的公司行为/交易日价格源，再仅在训练/验证数据上设计稳健收益标签与保守轻量排序基线；保留未来全新时期或事先约定的 walk-forward 做独立评价。不应立即投入 Transformer GPU 训练。
+
+### P4.3-D 异常标签源价格复核与稳健轻量基线（2026-11-15，已提交待真实运行）
+
+新增源码 `ashare/p4_price_trace.py` 与 `ashare/p4_light_baselines.py`，相应单元测试为 `tests/test_p4_price_trace.py`、`tests/test_p4_light_baselines.py`。该阶段是基于 P4.3-C 已核验的训练/验证期因子时变性与标签长尾问题开发的**研究诊断工具**，不是已训练验证完成的新交易策略，未对旧测试期选参，也未启动 Transformer。
+
+**D1：异常标签价格复核**。从 P4.3-C 的 `label_outliers.csv` 分别选择训练、验证期绝对收益最大的最多 30 条（均可调），只读查询 `public.market WHERE not_billing=1` 的对应股票及正式市场日历。逐一从 T+1 至 T+6 的真实交易日**重新计算开盘到开盘收益**，检查缺失/无效日线、源价格与原标签是否一致，并记录连续开盘价跳变（默认 15% 阈值）。**历史行情只读取已查看测试期开始前的日期**；价格跳变仅表示需要进一步查实，**不自动判定送转/分红/复权错误**。保存 `price_trace_summary.json`、`price_trace_cases.csv`、`price_trace_bars.csv`。
+
+**D2：同一验证样本上的七种轻量比较**。保持旧 P4 动态 Top-800、时间切分、标签净化及相同的验证集，比较固定 MA20 反转、训练期最强单因子、训练期选定方向的等权因子秩组合、原始 Ridge（固定 alpha 1.0）、仅训练期绝对标签 95%/99% 分位截尾的 Ridge、按训练期当日收益百分位排名拟合的 Ridge。**所有截尾阈值、方向、模型权重只从训练集产生**；验证表现仅用于探索诊断、不会自动决定新模型优胜者，旧测试集不参与。原 Ridge 元数据仅锁定股票池配置、训练/验证分界及样本数，**不是每行行情快照相同的密码学证明**。保存 `baseline_comparison.json`、`baseline_validation_summary.csv`、`baseline_validation_daily.csv`。
+
+Ubuntu 测试与运行命令如下（仅本地 CSV 输出、只读数据库）：
+
+```bash
+cd ~/gcdev/alphagpt/AlphaGPT
+conda activate py312
+git switch ashare-dev
+git pull --ff-only origin ashare-dev
+python -m unittest discover -s tests -p 'test_p4_price_trace.py' -v
+python -m unittest discover -s tests -p 'test_p4_light_baselines.py' -v
+python -m unittest discover -s tests -p 'test_*.py' -v
+
+python -u -m ashare.p4_price_trace \
+  --outliers reports/ashare_p4_factor_audit/2025-03-01_2026-09-30/label_outliers.csv \
+  --reference-metadata reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json \
+  --limit-per-split 30 --jump-threshold 0.15 \
+  --out reports/ashare_p4_price_trace
+
+python -u -m ashare.p4_light_baselines \
+  --start 2025-03-01 --end 2026-09-30 \
+  --top-n 800 --min-price 3 --consecutive 40 --hold-sessions 5 \
+  --alpha 1.0 --top-k 20 \
+  --reference-metadata reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json \
+  --out reports/ashare_p4_light_baselines
+```
+
+**验收状态**：已向 `ashare-dev` 提交源码、测试与文档，已做本地 SQLAlchemy/SQLite 与 pandas 联合日期索引的兼容性冒烟检查；本轮**尚未在用户 Ubuntu 上执行完整新增测试或生产 PostgreSQL 真实数据运行**，因此不得声称新基线改善了 IC、标签跳变已归因或价格差异不存在。详细限制与六份输出见 [P4_MVP.md](ashare/P4_MVP.md)。
 
 ### P4 当前已实现的研究契约
 
