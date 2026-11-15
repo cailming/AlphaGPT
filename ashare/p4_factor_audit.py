@@ -77,13 +77,20 @@ def split_audit_pool(data: pd.DataFrame, calendar: pd.DatetimeIndex, *,
     if (train_fraction <= 0 or val_fraction <= 0 or
             train_fraction + val_fraction >= 0.9):
         raise ValueError("Invalid chronological fractions")
-    d = _validate_pool(data, calendar)
-    dates = pd.DatetimeIndex(sorted(d.trade_date.unique()))
+    # Establish the fixed date split using signal dates alone, BEFORE
+    # touching label columns. Exclude all test rows from schema/label checks
+    # and downstream analysis, even if they contain corrupted future labels.
+    signal_dates = pd.to_datetime(data.trade_date, errors="raise").dt.normalize()
+    if signal_dates.isna().any():
+        raise ValueError("Missing signal dates")
+    dates = pd.DatetimeIndex(sorted(signal_dates.unique()))
     if len(dates) < 80:
         raise ValueError("Need at least 80 pool signal dates")
     train_cut = int(len(dates) * train_fraction)
     test_cut = int(len(dates) * (train_fraction + val_fraction))
     val_start, test_start = dates[train_cut], dates[test_cut]
+    test_rows = int(signal_dates.ge(test_start).sum())
+    d = _validate_pool(data.loc[signal_dates.lt(test_start)].copy(), calendar)
     sid = pd.Series(np.arange(len(calendar)), index=calendar)
     vsid, tsid = int(sid[val_start]), int(sid[test_start])
     labelled = d.target_return.notna()
@@ -110,7 +117,7 @@ def split_audit_pool(data: pd.DataFrame, calendar: pd.DatetimeIndex, *,
         "train_purged_or_missing_label_rows": int(train_signal.sum() - len(train)),
         "validation_purged_or_missing_label_rows": int(val_signal.sum() - len(val)),
         "eligible_refit_pretest_samples": int(refit_eligible.sum()),
-        "test_rows_EXCLUDED_without_reading_labels": int(d.trade_date.ge(test_start).sum()),
+        "test_rows_EXCLUDED_without_reading_labels": test_rows,
         "purge_rule": "label_end_session < next_split_first_session",
     }
     return summary, train, val
@@ -138,7 +145,7 @@ def factor_diagnostics(train: pd.DataFrame, val: pd.DataFrame
         mean_ic=("rank_ic", "mean"),
         median_ic=("rank_ic", "median"),
         ic_std=("rank_ic", "std"),
-        share_positive_days=("rank_ic", lambda s: s.gt(0).mean()),
+        share_positive_days=("rank_ic", lambda s: s.dropna().gt(0).mean()),
     ).reset_index()
     train_means = aggregates.loc[aggregates.split.eq("train"), ["feature", "mean_ic"]]
     signs = train_means.set_index("feature").mean_ic.apply(
