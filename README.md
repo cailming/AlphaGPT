@@ -216,6 +216,8 @@ python -u -m ashare.p4_light_baselines \
 
 **验收状态**：已向 `ashare-dev` 提交源码、测试与文档，已做本地 SQLAlchemy/SQLite 与 pandas 联合日期索引的兼容性冒烟检查；本轮**尚未在用户 Ubuntu 上执行完整新增测试或生产 PostgreSQL 真实数据运行**，因此不得声称新基线改善了 IC、标签跳变已归因或价格差异不存在。详细限制与六份输出见 [P4_MVP.md](ashare/P4_MVP.md)。
 
+**单测修复（2026-11-15）**：用户 Ubuntu 执行完整单测共 86 项，仅 `test_p4_price_trace.test_detects_mismatch_and_large_open_jump_without_classifying_action` 因警告文案缺少 `NOT proof` 导致断言失败，算法及数量断言未报错。已在 `ashare/p4_price_trace.py` 明确写出“开盘价跳变不是公司行为证据”，使源码告警与既有单测契约一致；需用户 `git pull` 后重测，不可提前宣称 86 项全通过。SQLite 的 Python 3.12 `DeprecationWarning` 非致命。
+
 ### P4 当前已实现的研究契约
 
 当前 `970151c` 提交已经包含 P4 MVP，而非需要从零开发：
