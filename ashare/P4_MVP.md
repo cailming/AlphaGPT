@@ -289,7 +289,10 @@ Use the same original dynamic Top-800, 40-session history, T+1->T+6
 labels, date fractions and purged training/validation split. Validate
 those dates, selected-row count, validation-label sample count and refit
 sample count against the old `P4_RIDGE_V1 model_metadata.json`.
-**Aggregate agreement does not prove a byte-identical market snapshot**.
+**The CLI also **recomputes the fixed-alpha Ridge's validation mean Rank IC**
+and fails closed if it does not match the archived reference metric within
+1e-6, when that alpha appears in saved tuning metadata. This improves
+reproducibility but still does NOT prove a byte-identical market snapshot**.
 
 ```bash
 python -m unittest discover -s tests -p 'test_p4_light_baselines.py' -v
