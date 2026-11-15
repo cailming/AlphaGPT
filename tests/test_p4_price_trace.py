@@ -78,6 +78,12 @@ class P4PriceTraceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "gap"):
             select_cases(corrupt, test_start="2025-02-15")
 
+    def test_old_validation_label_must_finish_before_test(self):
+        cases = select_cases(self.outliers.iloc[:1], test_start="2025-02-15")
+        with self.assertRaisesRegex(ValueError, "excluded test boundary"):
+            trace_price_paths(cases, self.bars, self.cal,
+                              test_start=str(self.cal[8].date()))
+
     def test_select_only_formal_source_rows(self):
         db = create_engine("sqlite+pysqlite:///:memory:")
         with db.begin() as conn:
