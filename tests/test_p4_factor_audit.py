@@ -69,6 +69,10 @@ class P4FactorAuditTests(unittest.TestCase):
         pd.testing.assert_frame_equal(factors1, factors2)
         pd.testing.assert_frame_equal(labels1, labels2)
         pd.testing.assert_frame_equal(outliers1, outliers2)
+        # Corrupting only holdout rows must not upcast the retained
+        # train/validation label-end column in the published audit output.
+        self.assertEqual(str(outliers1["label_end_session"].dtype), "Int64")
+        self.assertEqual(str(outliers2["label_end_session"].dtype), "Int64")
         self.assertFalse(report1["test_labels_used_in_audit"])
 
     def test_factor_ic_direction_selected_on_train_only(self):
