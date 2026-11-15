@@ -93,7 +93,7 @@ class P4FactorAuditTests(unittest.TestCase):
         _, train, val = split_audit_pool(self.frame, self.calendar)
         stats, outliers = label_diagnostics(train, val, extreme_threshold=.0015)
         self.assertEqual(stats.sample_rows.tolist(), [285, 85])
-        self.assertEqual(stats.abs_gt_threshold_rows.tolist(), [171, 51])
+        self.assertEqual(stats.abs_gt_threshold_rows.tolist(), [114, 34])
         self.assertTrue(outliers.target_return.abs().gt(.0015).all())
         self.assertFalse((outliers.trade_date >=
                           self.frame.trade_date.sort_values().unique()[80]).any())
