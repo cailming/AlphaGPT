@@ -432,3 +432,36 @@ See **[P4.3-E data contract and Ubuntu commands](P4_3_E_CORPORATE_ACTIONS.md)**.
 6. Output files: `corporate_action_gate.json`, `corporate_action_daily.csv`, `corporate_action_impacted_cases.csv`. Under the currently empty complete coverage ledger, `training_label_allowed_rows=0` is a **correct fail-closed outcome**, not evidence that corporate actions are absent.
 
 **Outstanding blocker**: obtain, source-check and version complete market-wide historical split/bonus/cash-dividend records, including ex-dates and publication timestamps; separately resolve rights issues, halts, adjusted input features and coverage attestations. Only after that rebuild labels and train a new model with an actually unseen future evaluation period. Do not resume the Transformer track based on the existing contaminated labels.
+
+
+## P4.3-E2: provider candidate action acquisition and stock coverage audit
+
+Implementation (2026-11-15): [`ashare/p4_action_feed.py`](p4_action_feed.py)
+with 11 synthetic local regression tests
+[`tests/test_p4_action_feed.py`](../tests/test_p4_action_feed.py).
+Follow the complete [P4.3-E2 collection, batch, coverage and verification guide](P4_3_E2_FEED.md).
+
+The commands are `snapshot` (read-only formal market symbols union Tushare stock_basic L/D/P with immutable SHA-256 snapshot),
+`fetch` (one stock's Tushare dividend history at a time, bounded batches, explicit failures/caps, excludes any event/announcement in the already-inspected test period), and
+`audit` (normalization of implemented ex-date entitlements, duplicate/conflict quarantine, stock-by-stock fetch coverage, official BYD evidence consistency check and explicit non-certification).
+Tushare `dividend` fields are `imp_ann_date`, `ex_date`, `record_date`,
+`stk_bo_rate`, `stk_co_rate`, `cash_div_tax` and `div_proc`; implementation
+announcement date is required and proposal announcement alone is insufficient.
+Source: [Tushare dividend documentation](https://tushare.pro/document/2?doc_id=103) and
+[stock_basic documentation](https://tushare.pro/document/2?doc_id=25).
+
+**Safety**: vendor records are named `UNVERIFIED_corporate_actions_candidates.csv`;
+per-stock `coverage_by_stock.csv` uses statuses `NOT_FETCHED`,
+`FETCH_FAILED_OR_TRUNCATED` and `FETCHED_NOT_VERIFIED`. No
+`COMPLETE_VERIFIED` certificate is produced, regardless of the number of
+successful API responses; even an empty dividend response cannot certify the
+absence of stock rights, splits and other complex actions. Automatic rights
+issues and historical adjusted feature windows remain unsolved. The existing
+P4.3-E economic-target gate remains **closed**.
+
+**Real-world status**: provider credential, actual Ubuntu Tushare API calls,
+full-market batch downloads, issuer announcement reconciliation beyond BYD,
+and completeness certification have NOT been performed in this turn.
+The local 11 tests succeeded using deterministic mock vendor responses and
+SQLite for the read-only market selection. Do not state that full-market
+company-action coverage has already been acquired.
