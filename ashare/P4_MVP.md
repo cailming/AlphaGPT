@@ -416,3 +416,19 @@ This review is an artifact reconciliation plus one independently
 verified published corporate action. It did **not** run SQL against
 production DB itself, verify all corporate actions, prove exact market
 snapshot identity or verify that Ubuntu's entire regression suite passed.
+
+
+## P4.3-E: verified corporate actions, economic label reconstruction and fail-closed coverage
+
+**Implementation status (2026-11-15)**: `ashare/p4_corporate_actions.py` and `tests/test_p4_corporate_actions.py` are committed to `ashare-dev`. Seven focused synthetic unit tests passed in the development runtime; the Ubuntu full-suite and live PostgreSQL audit have **not** been run during this implementation. Do not confuse unit tests with complete historical data certification.
+
+See **[P4.3-E data contract and Ubuntu commands](P4_3_E_CORPORATE_ACTIONS.md)**. Key invariants:
+
+1. Event ledger `ashare/data/corporate_actions_verified_examples.csv` includes exactly one official source-backed example, BYD 002594 ex-date 2025-07-29, 3 post-event shares per old share plus 3.974 gross cash per old share; source is [SZSE publication 2025-047](https://disc.static.szse.cn/download/disc/disk03/finalpage/2025-07-22/f30e6169-4779-487e-acff-8c1eff230fa4.PDF).
+2. Coverage ledger `ashare/data/corporate_action_coverage_examples.csv` is **intentionally header-only**. No full-market or BYD interval completeness claim has been verified. An observed event is never proof that all other events are absent.
+3. Model-training label release requires explicit verified full stock/date coverage over the **entire 40-market-session feature lookback and forward label window**, accurate source-price reconciliation, and absence of known ex-dates inside the legacy unadjusted feature window. Otherwise report `UNKNOWN_ACTION_COVERAGE` or `UNADJUSTED_FEATURE_ACTION_WINDOW`, and emit **NaN** for the model-ready economic target.
+4. Known corporate actions can produce an **illustrative gross economic return** independent of training status. If the ex-date is exactly T+1 purchase day, the buyer has missed the registration date and receives no entitlement. Cash is not reinvested; fractional lots, taxes, split-specific settlement and brokerage costs are not modeled.
+5. The CLI only performs `SELECT` from `public.market` for dates ending **2026-06-11** (old test begins 2026-06-12), rebuilds the same P4 pool and fails before writing files if pre-test valid label count or recomputed raw labels disagrees with the old `refit_samples=241095`. It does not edit the original Ridge model.
+6. Output files: `corporate_action_gate.json`, `corporate_action_daily.csv`, `corporate_action_impacted_cases.csv`. Under the currently empty complete coverage ledger, `training_label_allowed_rows=0` is a **correct fail-closed outcome**, not evidence that corporate actions are absent.
+
+**Outstanding blocker**: obtain, source-check and version complete market-wide historical split/bonus/cash-dividend records, including ex-dates and publication timestamps; separately resolve rights issues, halts, adjusted input features and coverage attestations. Only after that rebuild labels and train a new model with an actually unseen future evaluation period. Do not resume the Transformer track based on the existing contaminated labels.
