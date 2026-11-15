@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge 基线、事后诊断和训练/验证期独立因子与标签审计：`ashare/p4_train.py`、`p4_diagnostics.py`、`p4_factor_audit.py`、`tests/test_p4_factor_audit.py` | **P4.3-B 保存预测的真实诊断已验收；P4.3-C 审计代码与单测已提交，待 Ubuntu 单测和只读 PostgreSQL 实测**；轻量新模型尚未开发 |
+| P4.3 | Ridge 基线、事后诊断和训练/验证期独立因子与标签审计：`ashare/p4_train.py`、`p4_diagnostics.py`、`p4_factor_audit.py`、`tests/test_p4_factor_audit.py` | **P4.3-B 和 P4.3-C 真实运行输出均已跨文件核验；发现因子 IC 时变性/标签分布漂移**；新轻量模型尚未开发 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -149,6 +149,37 @@ python -u -m ashare.p4_factor_audit \
 **验收状态**：新增源码及防泄漏单测已提交；本轮尚未在用户 Ubuntu 执行测试或 PostgreSQL 实际审计，**不得声称训练/验证期 Rank IC 已核验**。后续先检验这些结果，再决定是否开发 Logistic/LightGBM，最后预留全新未来时期评价。
 
 **2026-11-15 单测回归修复**：用户 Ubuntu 首轮运行 `tests/test_p4_factor_audit.py` 共 6 项，5 项通过、`test_holdout_targets_never_read` 失败；原因是测试期注入 `NaN` 后 pandas 将全列 `label_end_session` 从 `int64` 提升到 `float64`，即使训练/验证记录没有变化，也导致 `assert_frame_equal` 的 dtype 检查不通过。现已在训练/验证数据切片通过合法性校验后统一转换为可空整数 `Int64`，并强化对应测试对输出 dtype 的断言。此修复不读取或改变测试期收益标签，不修改数据库；尚待用户 Ubuntu 重新运行确认通过。
+
+### P4.3-C 真实数据库输出核验（2026-11-15）
+
+用户已在 Ubuntu 上完成 `python -u -m ashare.p4_factor_audit` 只读审计，并将 **5 份**输出上传到 Google Drive：
+[`agu/alphagpt/ashare_p4_factor_audit/2025-03-01_2026-09-30/`](https://drive.google.com/drive/folders/1G5gFhuyMqh3TUZ0UNKuQQ-KUFbBpSzvK)。
+已直接读取 `factor_audit.json`、`factor_ic_daily.csv`、`factor_ic_summary.csv`、`label_quality.csv`、`label_outliers.csv`，并与旧 Ridge 的 `model_metadata.json` 对照，用独立 pandas 代码复算汇总指标。
+
+**工程/文件一致性通过**：训练 179,621 行、225 个有效信号日期；验证 56,686 行、71 个有效日期；10 个因子累计 2,960 条逐日 IC、20 行汇总；每日 10 因子无重复、全部 IC 有限且落在 [-1,1]。IC 均值/中位数/标准差、有效天数、正 IC 天数占比及训练集选定方向与日度文件逐项吻合，最大浮点差约 `9.72e-17`。股票池 308,000 行、385 个有效选股日、2,699 只不同股票；日期切分/配置与 Ridge 元数据一致，`reference_metadata_match=true`、`test_labels_used_in_audit=false`。训练标签截至 2026-02-10，验证始于 2026-02-11；验证标签截至 2026-06-11，旧测试始于 2026-06-12。已排除 61,600 条测试**信号行**；旧测试 61,521 条有标签行，两者差 79 条属于标签有效性筛选，并非漏测。原 Ridge 最终重训样本 241,095 条也与此处对账一致。最初 train+val 独立指标样本合计 236,307 条，少于重训样本 4,788 条，因为训练/验证边界两侧的标签净化在重训时不再需要保留该内部隔离；**不能误报为样本丢失**。
+
+**十因子逐期 Rank IC**（先列训练，后列验证；未经多重比较或重叠标签时间序列显著性检验）：
+
+| 因子 | 训练平均 IC | 验证平均 IC |
+| --- | ---: | ---: |
+| `volatility_20` | -0.09758 | -0.01289 |
+| `range_intraday` | -0.09081 | -0.00376 |
+| `close_ma20_dev` | -0.07936 | +0.00754 |
+| `ret_10` | -0.06409 | +0.00264 |
+| `ret_5` | -0.04277 | +0.00174 |
+| `amount_ratio_20` | -0.03787 | -0.00275 |
+| `return_intraday` | -0.03352 | -0.00410 |
+| `volume_ratio_20` | -0.03035 | -0.00809 |
+| `ret_1` | -0.02488 | +0.01622 |
+| `log_liquidity_20` | -0.00569 | +0.02574 |
+
+**关键结论**：训练期 10/10 原始因子 IC 均为负，验证期 **5/10 反向**，其余五项的负 IC 幅度也显著衰减。训练最强的波动率、日内振幅、MA20 偏离在验证期几乎丧失排序效应；2026 年 4 月部分因子月均 IC 从负转正，表明**时变性/市场状态改变是重要风险**，但不能由本次审计直接断言其因果机制。不要仅凭已经查看过的测试期简单反转因子表现重新筛选因子。
+
+**标签分布**：训练期标签均值 +0.4072%、中位数 -0.2956%、正收益率 47.40%；验证期均值 +0.0120%、中位数 -0.9205%、正收益率 44.85%；绝对值超过 10% 的比例从 15.07% 升至 23.36%，超过 20% 从 3.13% 升至 4.50%（原始记录 **5,624 / 2,552**）。五日收益标签明显偏态、长尾且期间发生分布变化，值得比较仅使用训练期确定阈值的稳健目标函数；不复权公司行为仍需按历史公告/除权日期查证。
+
+`label_outliers.csv` 只保存**每个集合绝对涨跌最大的前 200 条**，共 400 条，已核对排序、阈值、分区日期、`label_end_session-session_id=6` 和唯一性。不是全部 8,176 条绝对变动超过 20% 的记录；反复出现的同一股票常涉及重叠的五日标签，**不是 400 个独立公司行为案例**，也不是已确认错价/除权。不能用不复权未来收益当作可执行交易利润。
+
+**验收边界与下一步**：这是审计产物之间及与旧模型元数据的**数据一致性核验通过**，并非重新访问 PostgreSQL 原始数据、验证完整时点风险历史、排除全部公司行为或证明模型有正向预测能力。建议先核查大幅标签的公司行为/交易日价格源，再仅在训练/验证数据上设计稳健收益标签与保守轻量排序基线；保留未来全新时期或事先约定的 walk-forward 做独立评价。不应立即投入 Transformer GPU 训练。
 
 ### P4 当前已实现的研究契约
 
