@@ -27,7 +27,10 @@ python -m unittest discover -s tests -p 'test_*.py' -v
 
 # 可选的供应商依赖；不要把 Token 保存到仓库、命令记录或输出文件
 python -m pip install tushare
-export TUSHARE_TOKEN='从用户自己的安全环境变量注入真实凭证'
+# 使用隐藏输入，避免把密钥明文写进 shell 历史或项目文件
+read -r -s -p "Tushare Pro Token: " TUSHARE_TOKEN
+echo
+export TUSHARE_TOKEN
 META=reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json
 ROOT=reports/ashare_p4_action_feed
 SNAP=$ROOT/snapshot_2024-12-01_2026-06-11
