@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 原始价格核验、P4.3-E 公司行为经济收益标签质量闸门 | **P4.3-B/C/D/E 真实产物均已核验；P4.3-E 只读审计正确隔离 241,095 条原始标签，仅提供比亚迪 5 条已知事件的税前示例修正**；全市场公司行为完整覆盖尚未取得，继续禁止模型重训 |
+| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 价格核验、P4.3-E 经济收益质量闸门及第二阶段 Tushare 全市场候选数据采集/覆盖审计 | **P4.3-B/C/D/E 第一阶段真实产物已核验；第二阶段代码及 11 项合成单测已通过本地验证**，待用户 Ubuntu 使用自己凭证批量取数；全市场事件完整覆盖和配股仍未核实，禁止重训 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -279,6 +279,17 @@ python -u -m ashare.p4_corporate_actions \
 **严格质量闸门行为正确**：`explicit_complete_coverage_assertions=0`、`verified_complete_coverage_rows=0`、`training_label_allowed_rows=0`，且全部 `economic_target_return` 没有发放；有效原始标签 241,095 条全部标记 `UNKNOWN_ACTION_COVERAGE`，另有 5,305 条为 `MISSING_ORIGINAL_LABEL`。当前 `universe_coverage_complete=false`、`training_is_blocked_by_incomplete_coverage=true`。这代表当前没有凭空认可其他股票的历史公司行为完整性，**应继续阻止模型重训**。
 
 **本轮验收边界**：是 **三份真实运行产物 vs 旧 Ridge 模型元数据/旧股票池 CSV 的独立对账**；没有再次直连 PostgreSQL 核实原始条目、完成全市场复权/现金权益事件搜集，或者验证用户 Ubuntu 全量单测日志。下一步需建立、版本化并核验全市场权益事件数据和完整覆盖证明，明确研究中使用可用作监督标签的经济收益 vs T 日不能泄漏未来信息的历史因子；数据补齐后才能开启新的模型训练与真正未来未见时期验证。
+
+### P4.3-E 第二阶段：全市场公司行为候选数据接入与覆盖审计（2026-11-15）
+
+**源码已提交（等待用户 Ubuntu 真实 Tushare 权限及数据拉取）**：
+
+- [`ashare/p4_action_feed.py`](ashare/p4_action_feed.py)：`snapshot → fetch → audit` 三段式流程。只读 `public.market WHERE not_billing=1` 中 `2026-06-12` 以前的历史股票代码，再与 Tushare Pro `stock_basic` 的上市/退市/暂停上市名单取并集；按股票调用 `dividend`（默认每批 50 个、请求间延迟 1.5 秒），保存原始供应商行、逐股请求状态和 SHA-256 校验的不可覆盖批次。
+- [`tests/test_p4_action_feed.py`](tests/test_p4_action_feed.py)：新增 **11 项本地测试通过**，覆盖上市/退市并集、无映射股票、供应商限额与失败、旧测试期公告排除、同日条款冲突拒绝、文件篡改/重复批次拒绝及比亚迪官方事件对照。全仓 Ubuntu 测试与供应商 API 真实调用尚未由本轮执行。
+- 供应商映射只认已实施的 `imp_ann_date`、`record_date`、`ex_date`、`stk_bo_rate + stk_co_rate`、`cash_div_tax`（税前）。预案、字段不全、数量冲突或达到 API 行数上限的股票均不自动通过。供应商候选严格命名 `UNVERIFIED_corporate_actions_candidates.csv`；逐股状态仅为 `NOT_FETCHED`、`FETCH_FAILED_OR_TRUNCATED` 或 `FETCHED_NOT_VERIFIED`，**不会生成 `COMPLETE_VERIFIED`**。
+- 供应商 `dividend` 不覆盖配股等复杂权益变化，也不能仅靠返回空行证明“公司没有分红送转”。完整历史事件的发行人公告对账、数据源覆盖证明和历史复权因子仍需后续完成；**P4.3-E 第一阶段质量闸门保持关闭，不允许发布新训练标签或启动 Transformer**。
+
+完整的 Ubuntu 三阶段执行示例（包括用户自己的 `TUSHARE_TOKEN`、批次进度和核验产物）见 [P4.3-E 第二阶段操作说明](ashare/P4_3_E2_FEED.md)。供应商字段以 [Tushare 官方 dividend 文档](https://tushare.pro/document/2?doc_id=103) 和 [stock_basic 文档](https://tushare.pro/document/2?doc_id=25) 为准。**这次交付的是可运行的数据接入与覆盖诊断，不是已经获取的全市场供应商数据或完整公司行为历史。**
 
 ### P4 当前已实现的研究契约
 
