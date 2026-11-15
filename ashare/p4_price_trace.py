@@ -19,8 +19,9 @@ from .daily import AShareDailyLoader
 WARNING = (
     "SOURCE PRICE RECONCILIATION ONLY. No adjusted prices, corporate-action "
     "table, historical ST certification, exchange fill verification or trading "
-    "PnL. A large open-price jump MAY be genuine market movement, adjustment "
-    "or bad upstream data; review an independently dated exchange/company "
+    "PnL. A large open-price jump is NOT proof of a corporate action; it "
+    "MAY reflect genuine market movement, a corporate-action price adjustment "
+    "or bad upstream data. Review an independently dated exchange/company "
     "announcement before classifying it. NO old-test labels are processed."
 )
 
