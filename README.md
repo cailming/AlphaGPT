@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge 基线、事后诊断、训练/验证期因子审计，以及 P4.3-D 价格路径追溯/稳健轻量模型比较：`ashare/p4_light_baselines.py`、`ashare/p4_price_trace.py` | **P4.3-B/C 真实审计已验收；P4.3-D 两个新命令及对应单测已提交、待 Ubuntu 真实运行验证**；没有可宣称独立优胜的新模型 |
+| P4.3 | Ridge 基线、事后诊断、训练/验证因子审计、P4.3-D 正式行情追溯及七种轻量候选比较 | **P4.3-B/C/D 研究输出已对账；P4.3-D 发现 002594 已确认的未复权标签污染，阻断模型晋级**。七方案均未在已知验证期取得正的 Top-20 相对标签优势；需 P4.3-E 公司行为数据治理 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -217,6 +217,22 @@ python -u -m ashare.p4_light_baselines \
 **验收状态**：已向 `ashare-dev` 提交源码、测试与文档，已做本地 SQLAlchemy/SQLite 与 pandas 联合日期索引的兼容性冒烟检查；本轮**尚未在用户 Ubuntu 上执行完整新增测试或生产 PostgreSQL 真实数据运行**，因此不得声称新基线改善了 IC、标签跳变已归因或价格差异不存在。详细限制与六份输出见 [P4_MVP.md](ashare/P4_MVP.md)。
 
 **单测修复（2026-11-15）**：用户 Ubuntu 执行完整单测共 86 项，仅 `test_p4_price_trace.test_detects_mismatch_and_large_open_jump_without_classifying_action` 因警告文案缺少 `NOT proof` 导致断言失败，算法及数量断言未报错。已在 `ashare/p4_price_trace.py` 明确写出“开盘价跳变不是公司行为证据”，使源码告警与既有单测契约一致；需用户 `git pull` 后重测，不可提前宣称 86 项全通过。SQLite 的 Python 3.12 `DeprecationWarning` 非致命。
+
+### P4.3-D 真实产物核验：复现通过，但发现公司行为标签污染（2026-11-15）
+
+用户在 Ubuntu 运行 `ashare.p4_price_trace` / `ashare.p4_light_baselines`，并把 6 份输出上传至 Google Drive：
+- [`agu/alphagpt/ashare_p4_price_trace/`](https://drive.google.com/drive/folders/17x-joE0RFwItS-reCt9fgdwcRm7m7znz)：`price_trace_summary.json`、`price_trace_cases.csv`、`price_trace_bars.csv`；
+- [`agu/alphagpt/ashare_p4_light_baselines/2025-03-01_2026-09-30/`](https://drive.google.com/drive/folders/1bYJ0yWjK7txXK2IJRczQFGuG-aolA9aZ)：`baseline_comparison.json`、`baseline_validation_summary.csv`、`baseline_validation_daily.csv`。
+
+**文件间与保存产物对账通过，尚非模型/行情源质量验收**：
+- 价格追溯抽样为训练、验证期各 30 条，共 **60 条研究标签、360 条正式日线路径**。与 P4.3-C 的 `label_outliers.csv` 排名前 30 条/分组全部匹配，开盘到开盘收益、最大相邻开盘跳变、跳变日期与 JSON 状态能逐条独立复算，**60/60 标签与数据库读回值一致**，无缺失路径、无重算不符。**58/60** 条信号窗口出现 >15% 的相邻开盘价变化，涉及 **38 只股票、41 个股票/跳变日期组合**，有重复覆盖的事件，不能认为是 58 个独立公司行为案例。
+- **已由公开发行人公告确认的真实公司行为反例：002594 比亚迪**。`trade_date=2025-07-25` 的信号在 2025-07-28 以开盘价 ¥337.93 为入场参考，2025-08-04 以 ¥104.00 为退出参考，不复权标签 **-69.2244%**；2025-07-29 相邻开盘价 **-66.8541%**。比亚迪 2025-07-21 发布、2025-07-22 登载的《2024年度利润分配及资本公积金转增股本实施公告》（证券代码 002594、公告编号 2025-047）明确规定 **2025-07-29 除权除息，每 10 股送 8、转增 12、派发现金 ¥39.74**：[公开公告原文](https://epaper.stcn.com/pic/202507/22/37e227d2c542dd4204dafd9319859879.pdf)。每 1 股送转后对应 3 股；以期末股价和税前现金红利粗算，`(3×104.00 + 3.974)/337.93 − 1 ≈ −6.50%`，与原始 `104.00/337.93 − 1 ≈ −69.22%` 差异巨大。该简化经济收益并非交易 PnL；**但已经证实当前不复权的监督目标至少在此类样本中错误**。同一除权事件在抽样中影响 002594 的 **5 条相邻信号**，不得误算为 5 次独立大跌。
+- 七种轻量基线在相同的 **71 个验证交易日、56,686 条有效标签样本**上输出 497 条日度结果；逐候选复算 IC/Top20/股票池标签指标与 CSV 一致。固定 `alpha=1.0` 的原 Ridge 验证 Rank IC **-0.0111672834**，与旧 `model_metadata.json` 完全一致（差 0）。元数据仍明确 `per_row_market_snapshot_identity_verified=false`，所以不是数据库逐行快照一致性的证明。
+- **七个方案的 Top-20 五日未来标签相对股票池均值全部为负**（单位：百分点）：`neg_ma20_fixed -0.6864`、`train_best_single_factor -0.2155`、`train_signed_rank_ensemble -0.7102`、`ridge_original -0.3623`、`ridge_clip_abs_train_q95 -0.5577`、`ridge_clip_abs_train_q99 -0.3252`、`ridge_daily_rank_target -0.7340`。后两类中的部分方案 IC 小幅为正：最强单因子 **+0.01289**、日内排名目标 Ridge **+0.00529**，但没有稳定正的 Top-20 超额证据，更不能据旧验证集挑选模型后宣称新的样本外胜出。标签重叠、缺失公司行为、手续费与实际成交尚未处理。
+
+**工程判断**：P4.3-D 的**产物一致性核验通过**，但发现**正式标签语义存在已确认的重大缺陷**。应把“全市场历史送转/分红/拆并股/停复牌的时点数据与总回报标签重建”设为 **P4.3-E 前置阻断任务**，处理与公司行为跨越有关的历史因子窗口及标签，并追溯源价格。不能直接把 `abs(label) > 0.2` 的交易全部删除——真实行情可能确实大涨大跌；应依据可核实公告、交易日和有效时间校正或标记。T 日特征只能用截至 T 已经可见的信息，未来公司行为只能用于**监督标签**不能偷渡到特征。完成全市场再训练/新窗口留出之前，不启动 Transformer，也不发表可执行盈利结论。
+
+**验收边界**：此轮是六份文件与前次输出、历史公司公告之间的核对；**没有重新连接生产数据库取数，也没有取得完整全市场复权/历史风险记录**。用户上传输出意味着命令已执行，但没有据此宣称最新完整 86 项单测均已通过。
 
 ### P4 当前已实现的研究契约
 
