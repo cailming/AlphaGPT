@@ -7,7 +7,10 @@ import numpy as np
 import pandas as pd
 
 from ashare.p4_factor_audit import FEATURE_NAMES, split_audit_pool
-from ashare.p4_light_baselines import compare_train_validation, train_factor_directions
+from ashare.p4_light_baselines import (
+    check_frozen_ridge_validation_ic, compare_train_validation,
+    train_factor_directions,
+)
 
 
 def bars():
@@ -72,6 +75,24 @@ class LightBaselineTests(unittest.TestCase):
         self.assertEqual(baseline, now)
         pd.testing.assert_frame_equal(rows, rows2)
         pd.testing.assert_frame_equal(daily, daily2)
+
+    def test_saved_ridge_validation_ic_regression_guard(self):
+        _, table, _, _ = compare_train_validation(self.train, self.val, top_k=5)
+        actual = float(table.loc[
+            table.candidate.eq("ridge_original"), "mean_rank_ic"
+        ].iloc[0])
+        saved = {"tuning": [{"alpha": 1.0,
+                             "validation_diagnostics": {"mean_rank_ic": actual}}]}
+        check = check_frozen_ridge_validation_ic(table, saved, alpha=1.0)
+        self.assertTrue(check["frozen_ridge_validation_ic_matched"])
+        self.assertFalse(check["per_row_market_snapshot_identity_verified"])
+        saved["tuning"][0]["validation_diagnostics"]["mean_rank_ic"] = actual + 0.05
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            check_frozen_ridge_validation_ic(table, saved, alpha=1.0)
+        self.assertFalse(
+            check_frozen_ridge_validation_ic(table, saved, alpha=.1)
+            ["frozen_ridge_validation_ic_reference_available"]
+        )
 
     def test_invalid_configuration_and_nonfinite_inputs_rejected(self):
         with self.assertRaisesRegex(ValueError, "configuration"):
