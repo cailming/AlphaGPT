@@ -465,3 +465,9 @@ and completeness certification have NOT been performed in this turn.
 The local 11 tests succeeded using deterministic mock vendor responses and
 SQLite for the read-only market selection. Do not state that full-market
 company-action coverage has already been acquired.
+
+## P4.3-E2 default no-Token ingestion route (2026-11-15)
+
+The prior Tushare-specific collector is **optional**. User workflows prioritize free/open-source tooling: `ashare/p4_action_feed_free.py` implements read-only formal-market code snapshots, bounded AkShare `stock_history_dividend_detail` (Sina dividend and rights) plus `stock_dividents_cninfo` (CNINFO dividend) collection, per-ten-share unit conversion, two-source agreement checks, strict old-test cutoff, immutable checksum-protected batches, separately flagged rights issues, issuer-control comparisons and fail-closed per-stock coverage reporting. **No TUSHARE_TOKEN is needed.**
+
+[Ubuntu commands and limitations](P4_3_E2_FREE_FEED.md). [Optional existing Tushare workflow](P4_3_E2_FEED.md). Seven focused tests passed locally in the development runtime; real AkShare website data and Ubuntu full-suite remain unverified. Successful public-interface reads **never** automatically create `COMPLETE_VERIFIED` certificates, economic-return training targets or deployable models.
