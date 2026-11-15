@@ -241,7 +241,8 @@ def main() -> None:
         "original_validation_start": old["validation_start"],
         "original_test_start_EXCLUDED": old["test_start"],
         "original_refit_samples": old["refit_samples"],
-        "original_model_metadata_matched": True,
+        "reference_split_and_counts_matched": True,
+        "per_row_market_snapshot_identity_verified": False,
         "pool_config": pool.stats["pool_config"],
         "research_warning": RESEARCH_WARNING,
     })
