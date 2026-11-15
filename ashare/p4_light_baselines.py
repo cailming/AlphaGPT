@@ -7,6 +7,7 @@ All caps, signs and candidate definitions use training rows only.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import date, datetime
 import json
 from pathlib import Path
@@ -206,8 +207,7 @@ def main() -> None:
     with args.reference_metadata.open(encoding="utf-8") as fp:
         old = json.load(fp)
     if (old.get("model_version") != "P4_RIDGE_V1" or
-            old.get("pool_config") != vars(cfg) and
-            old.get("pool_config") != __import__("dataclasses").asdict(cfg)):
+            old.get("pool_config") != asdict(cfg)):
         raise ValueError("Reference Ridge model version or pool config mismatch")
     log("[1/4] SELECT only public.market, no DB writes")
     raw = load_formal_ohlcv(args.start, args.end, hold_sessions=cfg.hold_sessions,
@@ -229,7 +229,7 @@ def main() -> None:
             split["test_start_EXCLUDED"] != old["test_start"] or
             split["eligible_refit_pretest_samples"] != old["refit_samples"] or
             pool.stats["selected_rows"] != old["pool_stats"]["selected_rows"] or
-            len(train) != old["tuning"][0]["validation_diagnostics"]["evaluated_observations"] * 0 + len(train)):
+            len(val) != old["tuning"][0]["validation_diagnostics"]["evaluated_observations"]):
         raise ValueError("Reconstructed pool/split differs from original Ridge run")
     log("[3/4] Compare seven train-fitted/frozen candidates on validation ONLY")
     result, table, daily, models = compare_train_validation(
