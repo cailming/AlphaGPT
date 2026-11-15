@@ -175,6 +175,39 @@ def compare_train_validation(train: pd.DataFrame, val: pd.DataFrame, *,
     return summary, pd.DataFrame(reports), pd.concat(daily, ignore_index=True), models
 
 
+def check_frozen_ridge_validation_ic(table: pd.DataFrame, old_metadata: dict, *,
+                                     alpha: float, tolerance: float = 1e-6) -> dict:
+    """Ensure fixed-alpha Ridge reproduces the saved validation diagnostic.
+
+    This is a regression guard, NOT proof of row-identical market snapshots.
+    A new candidate alpha with no saved reference is explicitly not checked.
+    """
+    if tolerance <= 0:
+        raise ValueError("Invalid reference metric tolerance")
+    tuning = [entry for entry in old_metadata.get("tuning", [])
+              if abs(float(entry["alpha"]) - alpha) < 1e-12]
+    if not tuning:
+        return {"frozen_ridge_validation_ic_reference_available": False,
+                "per_row_market_snapshot_identity_verified": False}
+    if len(tuning) != 1:
+        raise ValueError("Ambiguous reference Ridge alpha")
+    old_ic = tuning[0]["validation_diagnostics"].get("mean_rank_ic")
+    scored = table.loc[table.candidate.eq("ridge_original"), "mean_rank_ic"]
+    if old_ic is None or len(scored) != 1 or not np.isfinite(float(old_ic)):
+        raise ValueError("Incomplete Ridge reference diagnostic")
+    new_ic = float(scored.iloc[0])
+    if not np.isfinite(new_ic) or abs(new_ic - float(old_ic)) > tolerance:
+        raise ValueError(
+            f"Rebuilt fixed Ridge validation IC mismatch: old={old_ic}, new={new_ic}"
+        )
+    return {"frozen_ridge_validation_ic_reference_available": True,
+            "frozen_ridge_validation_ic_reference": float(old_ic),
+            "frozen_ridge_validation_ic_recomputed": new_ic,
+            "frozen_ridge_validation_ic_absolute_error": abs(new_ic - float(old_ic)),
+            "frozen_ridge_validation_ic_matched": True,
+            "per_row_market_snapshot_identity_verified": False}
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="P4 train/validation lightweight baselines; no trading")
     p.add_argument("--start", type=date.fromisoformat, default=date(2025, 3, 1))
@@ -235,6 +268,9 @@ def main() -> None:
     result, table, daily, models = compare_train_validation(
         train, val, top_k=args.top_k, alpha=args.alpha
     )
+    # Cross-check the previously saved alpha's validation Rank IC. This never
+    # reads the inspected old TEST labels and fails before emitting results.
+    result.update(check_frozen_ridge_validation_ic(table, old, alpha=args.alpha))
     result.update({
         "dataset_start": args.start.isoformat(),
         "dataset_end": args.end.isoformat(),
