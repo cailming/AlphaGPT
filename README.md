@@ -148,6 +148,8 @@ python -u -m ashare.p4_factor_audit \
 
 **验收状态**：新增源码及防泄漏单测已提交；本轮尚未在用户 Ubuntu 执行测试或 PostgreSQL 实际审计，**不得声称训练/验证期 Rank IC 已核验**。后续先检验这些结果，再决定是否开发 Logistic/LightGBM，最后预留全新未来时期评价。
 
+**2026-11-15 单测回归修复**：用户 Ubuntu 首轮运行 `tests/test_p4_factor_audit.py` 共 6 项，5 项通过、`test_holdout_targets_never_read` 失败；原因是测试期注入 `NaN` 后 pandas 将全列 `label_end_session` 从 `int64` 提升到 `float64`，即使训练/验证记录没有变化，也导致 `assert_frame_equal` 的 dtype 检查不通过。现已在训练/验证数据切片通过合法性校验后统一转换为可空整数 `Int64`，并强化对应测试对输出 dtype 的断言。此修复不读取或改变测试期收益标签，不修改数据库；尚待用户 Ubuntu 重新运行确认通过。
+
 ### P4 当前已实现的研究契约
 
 当前 `970151c` 提交已经包含 P4 MVP，而非需要从零开发：
