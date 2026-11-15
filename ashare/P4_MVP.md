@@ -235,3 +235,110 @@ candidate unadjusted-price extremes against date-stamped corporate action
 evidence. Then implement a conservative baseline trained/tuned within
 train/validation only. Final performance still requires a genuinely
 untouched later period or predeclared walk-forward folds.
+
+
+## P4.3-D: Robust lightweight baselines and extreme-label price tracing
+
+Code: `ashare/p4_light_baselines.py`, `ashare/p4_price_trace.py`;
+synthetic tests: `tests/test_p4_light_baselines.py`,
+`tests/test_p4_price_trace.py`.
+
+These are **RESEARCH DIAGNOSTICS**, not portfolio backtests or approved
+live models. The old June-September 2026 holdout has already been inspected.
+The earlier February-June validation was also examined. Do NOT use the
+old validation to select a winner and then call its score a newly
+independent out-of-sample result. Obtain a genuinely later untouched date
+range, or predeclare walk-forward folds, before promotion.
+
+### D1: Explain possible price anomalies before assuming corporate actions
+
+The previously exported `label_outliers.csv` is a capped
+list (top 200 from train and validation each), not a full action registry.
+Run read-only price tracing for the 30 most extreme rows in each split:
+
+```bash
+cd ~/gcdev/alphagpt/AlphaGPT
+conda activate py312
+git switch ashare-dev && git pull --ff-only origin ashare-dev
+python -m unittest discover -s tests -p 'test_p4_price_trace.py' -v
+
+python -u -m ashare.p4_price_trace \
+  --outliers reports/ashare_p4_factor_audit/2025-03-01_2026-09-30/label_outliers.csv \
+  --reference-metadata reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json \
+  --limit-per-split 30 --jump-threshold 0.15 \
+  --out reports/ashare_p4_price_trace
+```
+
+The module issues exactly two read-only queries against formal
+`public.market WHERE not_billing=1`: the market-date calendar and
+OHLC for only the requested stocks. Both queries end before the old test
+start. It reconstructs T+1...T+6 **on the actual market calendar**, not
+by jumping over a halted or missing stock row. It compares unadjusted
+T+1/T+6 opens against the original label, checks intermediate OHLC
+presence/validity and flags open-price jumps above the stated 15%
+review threshold. Price changes do NOT prove corporate actions.
+
+Outputs: `price_trace_summary.json`,
+`price_trace_cases.csv`, `price_trace_bars.csv`.
+Missing bars, source-price mismatches and jumps must be reported, **not
+filled, silently dropped, adjusted without evidence or treated as profit**.
+
+### D2: Seven apples-to-apples lightweight research candidates
+
+Use the same original dynamic Top-800, 40-session history, T+1->T+6
+labels, date fractions and purged training/validation split. Validate
+those dates, selected-row count, validation-label sample count and refit
+sample count against the old `P4_RIDGE_V1 model_metadata.json`.
+**Aggregate agreement does not prove a byte-identical market snapshot**.
+
+```bash
+python -m unittest discover -s tests -p 'test_p4_light_baselines.py' -v
+python -m unittest discover -s tests -p 'test_*.py' -v
+
+python -u -m ashare.p4_light_baselines \
+  --start 2025-03-01 --end 2026-09-30 \
+  --top-n 800 --min-price 3 --consecutive 40 --hold-sessions 5 \
+  --alpha 1.0 --top-k 20 \
+  --reference-metadata reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json \
+  --out reports/ashare_p4_light_baselines
+```
+
+The seven candidates (all compared over exactly the same validation
+rows) are:
+
+1. `neg_ma20_fixed`: predeclared negative MA20 deviation, no fitting.
+2. `train_best_single_factor`: factor and sign chosen strictly from
+   **training-period** mean daily rank IC, not validation or test.
+3. `train_signed_rank_ensemble`: equal-weight same-day factor ranks
+   with signs chosen on training dates only (score is NOT expected return).
+4. `ridge_original`: alpha fixed at 1.0, trained on train only.
+5. `ridge_clip_abs_train_q95`: cap train labels at the 95th
+   percentile of train-only absolute label magnitudes.
+6. `ridge_clip_abs_train_q99`: analogous train-only 99th percentile.
+7. `ridge_daily_rank_target`: Ridge trained on within-train-date
+   target percent-ranks, not numeric expected returns.
+
+No candidate is automatically selected or deployed. Training-only signs,
+caps and fitted model weights do not incorporate future validation/test
+targets. The model diagnostics are date-wise cross-sectional IC, Top-20
+positive label share, mean five-session open-to-open forward **label**
+and excess vs the same day's pool. These are overlapping research labels,
+**not fills, trading costs or realized returns**. Even the known validation
+period is exploratory and cannot be reused to establish independent
+significance or select a strategy for real deployment.
+
+Outputs in `reports/ashare_p4_light_baselines/2025-03-01_2026-09-30/`:
+
+- `baseline_comparison.json`: train-only factor directions,
+  clipping limits, experiment protocol and explicit holdout-exclusion warning.
+- `baseline_validation_summary.csv`: seven candidates' date-mean IC,
+  positive forward labels, top-20 vs pool difference and equal sample counts.
+- `baseline_validation_daily.csv`: per-date metrics for all candidates,
+  for diagnosing sign/market-regime instability.
+
+**Verification workflow:** run new unit tests and real SELECT commands on
+Ubuntu; upload the six resulting files to Drive under
+`agu/alphagpt/ashare_p4_price_trace/` and
+`agu/alphagpt/ashare_p4_light_baselines/2025-03-01_2026-09-30/`.
+Inspect discrepancies before designing a new model. Do NOT automatically
+enable Transformer training based on these retrospective comparisons.
