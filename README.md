@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge 基线训练/独立推理及已保存预测的事后诊断：`ashare/p4_train.py`、`p4_predict.py`、`p4_diagnostics.py`、`tests/test_p4_diagnostics.py` | **Ridge 旧实测输出已复核，诊断 CLI 和 4 项测试已在本地运行**；效果弱于简单反转因子，Logistic/LightGBM 尚未实现，新模型必须留未来未见样本 |
+| P4.3 | Ridge 基线、事后诊断和训练/验证期独立因子与标签审计：`ashare/p4_train.py`、`p4_diagnostics.py`、`p4_factor_audit.py`、`tests/test_p4_factor_audit.py` | **P4.3-B 保存预测的真实诊断已验收；P4.3-C 审计代码与单测已提交，待 Ubuntu 单测和只读 PostgreSQL 实测**；轻量新模型尚未开发 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -125,6 +125,28 @@ Google Drive `agu/alphagpt/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.js
 - **负 IC 的不确定性**：77 日中 40 日 IC 为负、37 日为正，日度标准差约 **0.2644**；由于五日标签相互重叠，不能据此直接宣称统计显著，也不应据此直接反向交易。
 
 **验收边界**：这是“保存预测 → 诊断代码 → 四份文件”的输出一致性验证；并未从生产数据库重构真实行情、证明全部历史时点因果正确或核验佣金/公司行为。2026-06 至 2026-09 测试窗口已被多次查看，后续改模型不得继续用它选参数后称为新样本外验证。优先对训练/验证时期的因子、目标分布和不复权公司行为进行诊断，并为新模型保留新的未来留出期。
+
+### P4.3-C 训练/验证期因子及标签审计（代码已提交，2026-11-15）
+
+新增 `ashare/p4_factor_audit.py`、`tests/test_p4_factor_audit.py`：复用 P4 原有只读 `public.market WHERE not_billing=1` 加载、过去 20 日流动性 Top-800、至少 40 个连续有效交易日及未来开盘收益标签构造，严格沿用 **60%/20%/20% 日期切分与标签结束交易日的跨区间净化**。审计程序仅针对**训练期和验证期**计算十个量价因子的每日 Spearman Rank IC、均值/中位数/波动、训练集决定的因子方向在验证集的表现；另统计标签分位数、正收益标签比例、大幅异常未来收益候选。**不在审计统计中读取 2026-06-12 起已经看过的测试集标签**；不能把原先 Ridge 的测试集再作为“全新样本外”进行因子筛选。
+
+**重要数据约束**：先前 P4.1 的 `pool_selected.csv` 只含股票、日期、流动性、价格和标签，缺少十个特征及 `label_end_session`；因此本轮审计入口需要重新只读查询行情、重建相同股票池，不能直接拿该 CSV 计算因子 IC。支持用原 Ridge `model_metadata.json` 做一致性锁定，若验证开始日、测试开始日、重训样本数或股票池配置不一致则报错停止。默认只加载已验证的少量历史风险公告；不把当前 ST 倒灌到历史。
+
+Ubuntu 命令：
+
+```bash
+python -m unittest discover -s tests -p 'test_p4_factor_audit.py' -v
+python -m unittest discover -s tests -p 'test_*.py' -v
+python -u -m ashare.p4_factor_audit \
+  --start 2025-03-01 --end 2026-09-30 \
+  --top-n 800 --min-price 3 --consecutive 40 --hold-sessions 5 \
+  --reference-metadata reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json \
+  --out reports/ashare_p4_factor_audit
+```
+
+输出 `reports/ashare_p4_factor_audit/2025-03-01_2026-09-30/` 下的 `factor_audit.json`、`factor_ic_daily.csv`、`factor_ic_summary.csv`、`label_quality.csv`、`label_outliers.csv`。上榜异常只是**需要复核的样本**，不是已确认除权或公司行为；五日收益标签也不是可执行交易净利润。详见 [P4 研究说明](ashare/P4_MVP.md)。
+
+**验收状态**：新增源码及防泄漏单测已提交；本轮尚未在用户 Ubuntu 执行测试或 PostgreSQL 实际审计，**不得声称训练/验证期 Rank IC 已核验**。后续先检验这些结果，再决定是否开发 Logistic/LightGBM，最后预留全新未来时期评价。
 
 ### P4 当前已实现的研究契约
 
