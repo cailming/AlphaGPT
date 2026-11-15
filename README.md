@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 原始价格核验、P4.3-E 公司行为经济收益标签质量闸门 | **P4.3-B/C/D 真实产物已核验；P4.3-E 只读治理模块与 7 项新增本地单测已完成**。全市场权益事件覆盖尚不存在，质量闸门默认拒绝训练；需 Ubuntu 实测和完整数据源 |
+| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 原始价格核验、P4.3-E 公司行为经济收益标签质量闸门 | **P4.3-B/C/D/E 真实产物均已核验；P4.3-E 只读审计正确隔离 241,095 条原始标签，仅提供比亚迪 5 条已知事件的税前示例修正**；全市场公司行为完整覆盖尚未取得，继续禁止模型重训 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -263,6 +263,22 @@ python -u -m ashare.p4_corporate_actions \
 ```
 
 输出 `reports/ashare_p4_corporate_actions/2025-03-01_2026-06-11/`：`corporate_action_gate.json`、`corporate_action_daily.csv`、`corporate_action_impacted_cases.csv`。程序只查询早于旧测试期 2026-06-12 的行情、重新构建其时点动态 Top-800，并严格对账当时重训有效样本数 **241,095**；发生不一致则停止、不产生伪造结果。报告不是训练数据集。
+
+### P4.3-E 真实数据库产物交叉核验（2026-11-15）
+
+用户在 Ubuntu 完成 `ashare.p4_corporate_actions` 只读运行，并将三份产物上传到 Google Drive：
+[`agu/alphagpt/ashare_p4_corporate_actions/2025-03-01_2026-06-11/`](https://drive.google.com/drive/folders/1RSqOOb5hPsJJXBzKsgcyyDZXOK58eN05)：
+`corporate_action_gate.json`、`corporate_action_daily.csv`、`corporate_action_impacted_cases.csv`。
+
+**产物及时间切分验收通过**：日度 308 个研究日（2025-03-06 至 2026-06-11），每日 Top-800，合计 **246,400** 行；有效原始标签 **241,095**、缺失 **5,305**，其中 241,095/241,095 原始标签全部由正式行情的 T+1 / T+6 开盘价复算一致。旧 `model_metadata.json` 中 `model_version=P4_RIDGE_V1`、`test_start=2026-06-12`、`refit_samples=241095` 和股票池配置与本次产物核对完全一致；并非验证了源数据库逐行快照同一性。
+
+**与旧版股票池日度产物直接复核**：本轮全部 308 天的入池规模与旧版 `pool_daily_coverage.csv` 一致；其中 **302 天**的有效标签数完全一致；末尾 **2026-06-04 至 2026-06-11 六个交易日**因本次不读取 2026-06-12 及以后行情而全部被净化。原旧报表这六日有 **4,795** 条标签，因此旧报表截至 2026-06-11 的 245,890 条标签减去这 4,795 条，正好是本次 241,095 条。该差异是正确的跨测试边界标签隔离，**不是数据丢失**。
+
+**公司行为事件核对**：只读取已核实的比亚迪 `BYD-2025-047` 单个事件。三份产物统计相符：**5** 条跨越 2025-07-29 除权日的标签、**40** 条此后因子 40 交易日回看窗口仍含除权跳变的记录，总计 `corporate_action_impacted_cases.csv` **45** 行（均为 002594、无股票日期重复、无两种事件计数重叠）。逐行重算原收益比值及五条按 `(3×退出开盘价+3.974)/入场开盘价−1` 的税前示例收益，浮点误差约 `1e-16`；其中信号日 `2025-07-25` 的不复权标签 **-69.2244%**，修正示例为 **-6.4972%**。这只是已经核实的公告案例，并非全市场公司行为覆盖。
+
+**严格质量闸门行为正确**：`explicit_complete_coverage_assertions=0`、`verified_complete_coverage_rows=0`、`training_label_allowed_rows=0`，且全部 `economic_target_return` 没有发放；有效原始标签 241,095 条全部标记 `UNKNOWN_ACTION_COVERAGE`，另有 5,305 条为 `MISSING_ORIGINAL_LABEL`。当前 `universe_coverage_complete=false`、`training_is_blocked_by_incomplete_coverage=true`。这代表当前没有凭空认可其他股票的历史公司行为完整性，**应继续阻止模型重训**。
+
+**本轮验收边界**：是 **三份真实运行产物 vs 旧 Ridge 模型元数据/旧股票池 CSV 的独立对账**；没有再次直连 PostgreSQL 核实原始条目、完成全市场复权/现金权益事件搜集，或者验证用户 Ubuntu 全量单测日志。下一步需建立、版本化并核验全市场权益事件数据和完整覆盖证明，明确研究中使用可用作监督标签的经济收益 vs T 日不能泄漏未来信息的历史因子；数据补齐后才能开启新的模型训练与真正未来未见时期验证。
 
 ### P4 当前已实现的研究契约
 
