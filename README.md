@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 价格核验、P4.3-E 经济收益质量闸门及第二阶段 Tushare 全市场候选数据采集/覆盖审计 | **P4.3-B/C/D/E 第一阶段真实产物已核验；第二阶段代码及 11 项合成单测已通过本地验证**，待用户 Ubuntu 使用自己凭证批量取数；全市场事件完整覆盖和配股仍未核实，禁止重训 |
+| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 价格核验、P4.3-E 经济收益质量闸门，以及第二阶段**免费 AkShare 默认接入**/可选 Tushare 数据覆盖审计 | **P4.3-B/C/D/E 第一阶段真实产物已核验；AkShare 无 Token 适配器与 7 项本地测试通过**；真实公开接口批量采集及历史事件覆盖仍需核验，禁止重训 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -290,6 +290,14 @@ python -u -m ashare.p4_corporate_actions \
 - 供应商 `dividend` 不覆盖配股等复杂权益变化，也不能仅靠返回空行证明“公司没有分红送转”。完整历史事件的发行人公告对账、数据源覆盖证明和历史复权因子仍需后续完成；**P4.3-E 第一阶段质量闸门保持关闭，不允许发布新训练标签或启动 Transformer**。
 
 完整的 Ubuntu 三阶段执行示例（包括用户自己的 `TUSHARE_TOKEN`、批次进度和核验产物）见 [P4.3-E 第二阶段操作说明](ashare/P4_3_E2_FEED.md)。供应商字段以 [Tushare 官方 dividend 文档](https://tushare.pro/document/2?doc_id=103) 和 [stock_basic 文档](https://tushare.pro/document/2?doc_id=25) 为准。**这次交付的是可运行的数据接入与覆盖诊断，不是已经获取的全市场供应商数据或完整公司行为历史。**
+
+### P4.3-E2 免费、开源优先：AkShare 无 Token 公司行为数据接入（2026-11-15）
+
+**Tushare Pro Token 不是必须条件。** 旧的 `ashare/p4_action_feed.py` 是有 Token 时才可使用的可选方案；默认请使用新增的 `ashare/p4_action_feed_free.py`（无需 Token）。它从现有 `public.market` 的**历史出现过的股票代码**生成只读快照，通过 AkShare 的新浪财经（历史分红/配股）及巨潮资讯（历史分红）公开接口取数，按**每十股**换算送转和税前派息并进行双源对账；冲突与失败全部保留为未解决状态，配股另列人工核验清单。
+
+新增 `tests/test_p4_action_feed_free.py` **7 项本地回归测试已通过**，覆盖公司行为数量换算、双源冲突隔离、旧测试边界过滤、SHA256 防篡改、接口失败/配股隔离及股票范围未抓取。**截至本次提交，尚未在用户 Ubuntu 执行真实 AkShare 接口采集或全部仓库回归。** 获取免费数据并不代表其历史完整性或再利用条款得到认证；程序仍不签发任何 `COMPLETE_VERIFIED`，不释放训练标签。
+
+推荐试点及完整命令：[**P4.3-E2 无 Token AkShare 操作说明**](ashare/P4_3_E2_FREE_FEED.md)。试点前只需 `python -m pip install akshare`，无须配置任何 Token；此前 [Tushare 方案](ashare/P4_3_E2_FEED.md)仅作为可选替代。
 
 ### P4 当前已实现的研究契约
 
