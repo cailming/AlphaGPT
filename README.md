@@ -46,7 +46,7 @@
 | P3.3-C | 已公告风险事件按披露日/生效日拦截：`ashare/risk_events.py`、`tests/test_risk_events.py`、`ashare/data/risk_events_verified_examples.csv` | **已实现部分历史事件覆盖**；已核实 002731、688496，非全市场历史 ST |
 | P4.1 | 当日及此前信息的动态流动性 Top-N 股票池、连续有效交易日检查、风险事件局部拦截：`ashare/p4_mvp.py` | **真实 PostgreSQL 运行产物已交叉核验通过**（数量守恒、日/月汇总、唯一键、排名）；仍有风险/除权和时点可用性限制 |
 | P4.2 | 过去窗口量价特征、未来开盘价标签、停牌缺口校验、按日期切分及跨集合标签净化：`ashare/p4_mvp.py` | **已有 MVP 代码与单测**；不复权导致的除权偏差仍需审计 |
-| P4.3 | Ridge 基线、事后诊断、训练/验证因子审计、P4.3-D 正式行情追溯及七种轻量候选比较 | **P4.3-B/C/D 研究输出已对账；P4.3-D 发现 002594 已确认的未复权标签污染，阻断模型晋级**。七方案均未在已知验证期取得正的 Top-20 相对标签优势；需 P4.3-E 公司行为数据治理 |
+| P4.3 | Ridge/轻量基线与因子审计、P4.3-D 原始价格核验、P4.3-E 公司行为经济收益标签质量闸门 | **P4.3-B/C/D 真实产物已核验；P4.3-E 只读治理模块与 7 项新增本地单测已完成**。全市场权益事件覆盖尚不存在，质量闸门默认拒绝训练；需 Ubuntu 实测和完整数据源 |
 | P4.4 | PyTorch/CUDA Transformer、训练日志、checkpoint/恢复及与轻量模型公平对比 | **待开发** |
 
 详细设计参见 [ashare/README.md](ashare/README.md)、[ashare/FACTOR_ENGINE.md](ashare/FACTOR_ENGINE.md)、[ashare/QUALITY_REPORT.md](ashare/QUALITY_REPORT.md)、[ashare/BACKTEST.md](ashare/BACKTEST.md)、[ashare/RISK_EVENTS.md](ashare/RISK_EVENTS.md)、[ashare/P4_MVP.md](ashare/P4_MVP.md)。
@@ -233,6 +233,36 @@ python -u -m ashare.p4_light_baselines \
 **工程判断**：P4.3-D 的**产物一致性核验通过**，但发现**正式标签语义存在已确认的重大缺陷**。应把“全市场历史送转/分红/拆并股/停复牌的时点数据与总回报标签重建”设为 **P4.3-E 前置阻断任务**，处理与公司行为跨越有关的历史因子窗口及标签，并追溯源价格。不能直接把 `abs(label) > 0.2` 的交易全部删除——真实行情可能确实大涨大跌；应依据可核实公告、交易日和有效时间校正或标记。T 日特征只能用截至 T 已经可见的信息，未来公司行为只能用于**监督标签**不能偷渡到特征。完成全市场再训练/新窗口留出之前，不启动 Transformer，也不发表可执行盈利结论。
 
 **验收边界**：此轮是六份文件与前次输出、历史公司公告之间的核对；**没有重新连接生产数据库取数，也没有取得完整全市场复权/历史风险记录**。用户上传输出意味着命令已执行，但没有据此宣称最新完整 86 项单测均已通过。
+
+### P4.3-E 已提交：公司行为经济收益标签与严格覆盖闸门（2026-11-15）
+
+针对 P4.3-D 已证实的 002594 比亚迪送转除权标签失真，新增：
+
+- `ashare/p4_corporate_actions.py`：严格的只读审计 CLI，基于实际交易日复算旧未复权收益标签，对有经核实权益分派的持有窗口计算**税前简化经济收益**，并给出完整覆盖与特征污染标记。支持多事件、股份扩张/缩并、现金权益不复投；只使用旧测试边界前的 `public.market WHERE not_billing=1`。
+- `tests/test_p4_corporate_actions.py`：7 项合成测试，覆盖 T+1 除权入场不能享受此前红利、跨多次公司行为累计、无覆盖拒训、源价格不一致隔离、除权污染过去因子与禁止读取旧测试期。
+- `ashare/data/corporate_actions_verified_examples.csv`：唯一已列证据是比亚迪 2025-07-29 送转（旧每股变为 3 股）及税前每旧股现金 3.974 元；来源为[深交所披露的比亚迪 2025-047 实施公告](https://disc.static.szse.cn/download/disc/disk03/finalpage/2025-07-22/f30e6169-4779-487e-acff-8c1eff230fa4.PDF)。
+- `ashare/data/corporate_action_coverage_examples.csv`：**有意只有表头，没有任何 `COMPLETE_VERIFIED` 覆盖证明**。单份公告不能证实整个时间段不存在其他公司行为；本轮因此**预期训练允许样本为 0**，不允许静默把未发现事件当成无事件。
+
+更多算法定义、风险边界、命令及验收文件见 [P4.3-E 独立说明](ashare/P4_3_E_CORPORATE_ACTIONS.md)。
+
+**实施状态**：源码和单测提交到 `ashare-dev`；**本地新增 7 项单测通过，且 GitHub 源码与本地通过版本的 Git blob 哈希完全一致**。尚未由用户 Ubuntu 执行全仓回归或 P4.3-E PostgreSQL 实测。本阶段只解决“如何记录、估算和隔离”，**尚未获取全市场公司行为完整来源**，不能据此开始复权后模型训练或宣称盈利。
+
+Ubuntu 命令：
+
+```bash
+cd ~/gcdev/alphagpt/AlphaGPT
+conda activate py312
+git switch ashare-dev
+git pull --ff-only origin ashare-dev
+python -m unittest discover -s tests -p 'test_p4_corporate_actions.py' -v
+python -m unittest discover -s tests -p 'test_*.py' -v
+python -u -m ashare.p4_corporate_actions \
+  --start 2025-03-01 \
+  --reference-metadata reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json \
+  --out reports/ashare_p4_corporate_actions
+```
+
+输出 `reports/ashare_p4_corporate_actions/2025-03-01_2026-06-11/`：`corporate_action_gate.json`、`corporate_action_daily.csv`、`corporate_action_impacted_cases.csv`。程序只查询早于旧测试期 2026-06-12 的行情、重新构建其时点动态 Top-800，并严格对账当时重训有效样本数 **241,095**；发生不一致则停止、不产生伪造结果。报告不是训练数据集。
 
 ### P4 当前已实现的研究契约
 
