@@ -345,3 +345,74 @@ Ubuntu; upload the six resulting files to Drive under
 `agu/alphagpt/ashare_p4_light_baselines/2025-03-01_2026-09-30/`.
 Inspect discrepancies before designing a new model. Do NOT automatically
 enable Transformer training based on these retrospective comparisons.
+
+
+## P4.3-D: Real-data audit acceptance and corporate-action blocker (2026-11-15)
+
+The six user-uploaded artifacts were inspected independently and reconciled
+with the prior P4.3-C `label_outliers.csv` and archived Ridge metadata:
+
+- Google Drive [price trace](https://drive.google.com/drive/folders/17x-joE0RFwItS-reCt9fgdwcRm7m7znz):
+  **60** selected top absolute-label cases, **360** open-price bars;
+  all requested labels recompute exactly from the exported opens, no missing
+  bars or mismatches. **58** cases cross the 15% consecutive-open jump alert.
+  But the alerts represent **41 unique stock/jump-date pairs** in **38 stocks**,
+  not 58 independent corporate action incidents.
+- Google Drive [light baselines](https://drive.google.com/drive/folders/1bYJ0yWjK7txXK2IJRczQFGuG-aolA9aZ):
+  **7 candidates x 71 dates = 497** daily diagnostic rows; each evaluates
+  **56,686** purged validation samples. All candidate summary metrics
+  independently reconcile with their daily file. The original fixed-alpha
+  Ridge validation IC -0.011167283407209223 exactly matches archived metadata.
+
+### Confirmed false economic-return label
+
+The 002594 BYD case with signal 2025-07-25 enters (price proxy) at 2025-07-28
+open 337.93 and exits at 2025-08-04 open 104.00, giving an unadjusted
+research label -69.2244%. The 2025-07-29 open fell 66.8541% vs the prior
+open. BYD's **2025-047 actual implementation announcement**, issued
+2025-07-21, specifies **ex-dividend/rights date 2025-07-29,
+10 old shares receive 8 stock dividend shares + 12 capital reserve shares
+and 39.74 CNY gross cash dividend**:
+https://epaper.stcn.com/pic/202507/22/37e227d2c542dd4204dafd9319859879.pdf
+
+One pre-event share therefore corresponds to three post-event shares,
+plus 3.974 gross cash dividend. A simplified, not fee/tax-adjusted holding
+value example is `(3*104.00+3.974)/337.93-1 = -6.497%`, rather than
+`104.00/337.93-1 = -69.224%`. It is NOT audited realized PnL;
+it proves that an unadjusted price ratio **is not a correct economic
+return target for this corporate-action-crossing window**. The same
+ex-date appears in five adjacent BYD signals among the trace cases.
+This invalidates at least those historical labels for return-based
+supervision; it does not establish that all other large price changes
+were corporate actions.
+
+### Seven validation comparisons: no positive Top-20 excess
+
+| Candidate | Daily mean Rank IC | Daily mean Top-20 minus pool label |
+|---|---:|---:|
+| neg_ma20_fixed | -0.007538 | -0.006864 |
+| train_best_single_factor (negative volatility_20) | +0.012886 | -0.002155 |
+| train_signed_rank_ensemble | -0.005561 | -0.007102 |
+| ridge_original | -0.011167 | -0.003623 |
+| ridge_clip_abs_train_q95 | -0.005809 | -0.005577 |
+| ridge_clip_abs_train_q99 | -0.008328 | -0.003252 |
+| ridge_daily_rank_target | +0.005287 | -0.007340 |
+
+All values are **overlapping five-session forward-label diagnostics**,
+not trade profits. Some weakly positive ICs do not overcome negative
+Top-20 relative labels. Neither the old validation nor inspected 2026
+test can now serve as independent new model selection evidence.
+
+**P4.3-E blocking prerequisite**: assemble historically dated share
+split/bonus/capitalization, cash dividend and trading-suspension event
+records. Verify coverage and source publication/effective dates, compute
+corporate-action-aware forward *economic* returns, and audit T-as-of
+features around events without backfilling information from after T.
+Do not simply discard every >20% move: genuine high moves may exist.
+Retrain and report after these contracts are checked; reserve a genuinely
+unseen later period. No automatic Transformer GPU promotion.
+
+This review is an artifact reconciliation plus one independently
+verified published corporate action. It did **not** run SQL against
+production DB itself, verify all corporate actions, prove exact market
+snapshot identity or verify that Ubuntu's entire regression suite passed.
