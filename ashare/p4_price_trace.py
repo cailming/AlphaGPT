@@ -60,7 +60,8 @@ def select_cases(outliers: pd.DataFrame, *, test_start: str, hold_sessions: int 
 
 def trace_price_paths(cases: pd.DataFrame, raw: pd.DataFrame,
                       calendar: pd.DatetimeIndex, *, hold_sessions: int = 5,
-                      jump_threshold: float = 0.15, compare_tolerance: float = 1e-7
+                      jump_threshold: float = 0.15, compare_tolerance: float = 1e-7,
+                      test_start: str | None = None
                       ) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     """Independently recompute the exported open-to-open research label."""
     if hold_sessions < 1 or jump_threshold <= 0 or compare_tolerance <= 0:
@@ -98,6 +99,8 @@ def trace_price_paths(cases: pd.DataFrame, raw: pd.DataFrame,
             })
             continue
         session_dates = cal[pos+1:pos+hold_sessions+2]
+        if test_start is not None and session_dates[-1] >= pd.Timestamp(test_start):
+            raise ValueError("Price trace label path would cross excluded test boundary")
         open_prices, invalid_bars = [], False
         for offset, day in enumerate(session_dates, start=1):
             key = (row.stock_code, day)
@@ -164,13 +167,18 @@ def trace_price_paths(cases: pd.DataFrame, raw: pd.DataFrame,
 
 
 def load_formal_source_cases(cases: pd.DataFrame, *,
-                             hold_sessions: int = 5, engine=None
+                             hold_sessions: int = 5, engine=None,
+                             test_start: str | None = None
                              ) -> tuple[pd.DataFrame, pd.DatetimeIndex]:
     """Two SELECTs only: market dates and requested stock OHLC, no writes."""
     db = engine if engine is not None else AShareDailyLoader().engine
     begin = pd.Timestamp(cases.trade_date.min()).date()
     finish = (pd.Timestamp(cases.trade_date.max()) +
               timedelta(days=max(40, (hold_sessions+1) * 6))).date()
+    if test_start is not None:
+        finish = min(finish, (pd.Timestamp(test_start) - timedelta(days=1)).date())
+    if finish < begin:
+        raise ValueError("No pre-test market dates remain to trace")
     params = {"begin": begin, "finish": finish}
     calendar_sql = text("""
         SELECT DISTINCT trade_date FROM public.market
@@ -216,11 +224,13 @@ def main() -> None:
     def log(msg: str):
         print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
     log(f"[1/3] Read-only fetch market calendar and OHLC for {len(cases)} cases")
-    raw, calendar = load_formal_source_cases(cases, hold_sessions=hold)
+    raw, calendar = load_formal_source_cases(
+        cases, hold_sessions=hold, test_start=meta["test_start"]
+    )
     log("[2/3] Recompute T+1 to T+6 opens and flag missing bars and large jumps")
     summary, overview, daily = trace_price_paths(
         cases, raw, calendar, hold_sessions=hold,
-        jump_threshold=args.jump_threshold
+        jump_threshold=args.jump_threshold, test_start=meta["test_start"]
     )
     summary["reference_test_start_EXCLUDED"] = meta["test_start"]
     summary["outliers_input"] = str(args.outliers)
