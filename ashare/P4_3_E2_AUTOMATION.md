@@ -23,3 +23,21 @@ conda run -n py312 python -m unittest discover -s tests -p 'test_p4_action_*.py'
 - `latest_report.json` 指向最近一份完整审计。审计目录含 `pipeline_summary.json`、`coverage_summary.csv`、`source_health.csv`、`cross_source_reconciliation.csv`、`exceptions.csv`、`retry_queue.csv`、`manual_review_queue.csv`、`request_status.csv` 和 `issuer_controls.csv`。长期研究记录保存在本文件。GitHub README 发布阶段进度。
 - 100 股试点要求应查任务都有成功或明确的终态例外，且无 P0、待重试任务或当前熔断。个别缺字段、持续空响应及条款冲突保留证据，等待人工核查。试点通过后停在用户验收关口。
 - 数据和候选仅用于核对 `2026-06-12` 之前的公司行为。任一金额字段未知时保留未决状态。报告保持 `complete_verified_assertions_created=0`、`can_emit_training_labels=false`、`full_historical_action_coverage_certified=false`。经济收益标签仍需要独立证明发行人事件覆盖、权益参数与实施日期，以及配股等复杂事件的处理口径。
+
+## 100 股试点实测
+
+2026-11-16 在 `ubuntu92` 完成冻结索引 10–109，共 100 股，代码范围 `000014` 到 `000528`。自动处理索引 10–29 的遗留任务和三个新增 20 股批次。原采集退出码为 0。复用 239 个既有成功任务，本次发送 363 次请求。用 `8d2dff6` 执行 `resume` 重新审计后，363 份新尝试的文件清单和 SHA256 完全一致。Ubuntu `py312` 的 54 项相关离线测试通过，包含原有 31 项免费来源回归。
+
+| 接口 | 应查任务 | 有效成功 | 终态异常 | 成功返回空表 |
+|---|---:|---:|---:|---:|
+| 新浪分红 | 100 | 93 | 7 | 0 |
+| 巨潮分红 | 100 | 72 | 28 | 0 |
+| 新浪配股 | 100 | 100 | 0 | 33 |
+| BaoStock 年度查询 | 300 | 300 | 0 | 122 |
+
+- 600 个请求任务都有明确结论。71 股的全部请求成功，29 股有至少一个终态异常。34 个任务存在无法确认的除权或公告日期，已有可用行仍参与对账。`000016` 巨潮接口 3 次新尝试后仍为 `UPSTREAM_EMPTY_OR_SCHEMA`。
+- 96 条去重候选，2 条仅见单一来源。新浪与巨潮逐项完整匹配 0 条、部分字段未决 94 条。BaoStock 与 AkShare 送股、转增、税前现金均有值并匹配 2 条，部分字段未决 92 条。
+- 期内配股风险记录为 0。原始证据中另保留 109 条期外配股记录。比亚迪 `002594` 的既有发行人控制样本分别通过 AkShare 与 BaoStock 核对，未把该股票加入试点采集。
+- P0 为 0，P1 共 36 项，P2 共 189 项。日期来源问题之外的 P1 包括 `000423`（2025-09-03，新浪与巨潮权益条款冲突）、`000430`（2025-12-29，AkShare 单边候选）。没有待重试请求，当前熔断为空。旧测试期隔离检查通过。
+- 报告核验时间为 2026-11-16 15:23（UTC+08:00）。`ubuntu92` 的本次完整报告目录为 `/home/gc/gcdev/alphagpt/AlphaGPT/reports/ashare_p4_action_pipeline/audits/audit-vvs9po3e`。首轮采集日志为 `reports/ashare_p4_action_pipeline/collect.4A72H1.log`。
+- 试点停在用户验收关口。继续进入其他股票范围需等待验收。
