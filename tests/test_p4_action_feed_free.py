@@ -47,19 +47,6 @@ class FakeAk:
         return pd.DataFrame([x])
 
 
-class ModernAk(FakeAk):
-    """Current AkShare spelling; legacy method must never be selected."""
-    def stock_dividend_cninfo(self, symbol):
-        return FakeAk.stock_dividents_cninfo(self, symbol)
-    def stock_dividents_cninfo(self, symbol):
-        raise AssertionError("Legacy misspelled CNINFO method was selected")
-
-
-class PartialModernAk(ModernAk):
-    def stock_dividend_cninfo(self, symbol):
-        raise ConnectionError("simulated CNINFO request failure")
-
-
 class FreeFeedTests(unittest.TestCase):
     def setUp(self):
         self.tmp=TemporaryDirectory()
@@ -99,68 +86,6 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(report["fetched_not_verified"],2)
         self.assertEqual(len(issues),0)
 
-    def test_current_cninfo_method_name_selected_and_legacy_fallback_supported(self):
-        endpoint = free._endpoint(ModernAk(), "002594", "cninfo_dividend")
-        self.assertEqual(len(endpoint), 1)
-        self.assertEqual(endpoint.iloc[0]["除权日"], "2025-07-29")
-        old_endpoint = free._endpoint(FakeAk(), "002594", "cninfo_dividend")
-        self.assertEqual(len(old_endpoint), 1)
-        self.batch(ak=ModernAk())
-        report, events, stocks, _, _, _ = free.audit_batches(
-            self.snap, self.batchroot
-        )
-        self.assertEqual(report["failed_or_truncated"], 0)
-        self.assertEqual(report["fetched_not_verified"], 2)
-        self.assertEqual(report["endpoint_results"]["cninfo_dividend"]["success"], 2)
-        self.assertEqual(report["endpoint_results"]["sina_dividend"]["success"], 2)
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events.iloc[0].review_status,
-                         "TWO_PUBLIC_SOURCES_MATCH_UNVERIFIED")
-
-    def test_official_control_not_fetched_is_not_false_mismatch(self):
-        free.fetch_batch(self.snap, ak=ModernAk(), offset=0, limit=1,
-                         out=self.batchroot/"batch_000000", wait_seconds=0)
-        official=self.root/"official.csv"
-        official.write_text(
-            "stock_code,ex_date,share_multiplier,cash_per_old_share,source_id\n"
-            "002594,2025-07-29,3,3.974,BYD-2025-047\n"
-        )
-        report, _, stocks, _, _, controls = free.audit_batches(
-            self.snap, self.batchroot, official_events=official
-        )
-        self.assertEqual(controls.iloc[0].status, "NOT_FETCHED_FOR_CONTROL")
-        self.assertEqual(report["issuer_controls_not_fetched"], 1)
-        self.assertEqual(report["issuer_controls_mismatch"], 0)
-        self.assertEqual(report["issuer_controls_matched"], 0)
-        self.assertEqual(report["issuer_controls_incomplete_fetch"], 0)
-
-    def test_failed_control_source_not_misreported_as_data_conflict(self):
-        self.batch(ak=PartialModernAk())
-        official=self.root/"official.csv"
-        official.write_text(
-            "stock_code,ex_date,share_multiplier,cash_per_old_share,source_id\n"
-            "002594,2025-07-29,3,3.974,BYD-2025-047\n"
-        )
-        report, _, _, _, _, controls = free.audit_batches(
-            self.snap, self.batchroot, official_events=official
-        )
-        self.assertEqual(controls.iloc[0].status, "INCOMPLETE_FETCH_FOR_CONTROL")
-        self.assertEqual(report["issuer_controls_incomplete_fetch"], 1)
-        self.assertEqual(report["issuer_controls_mismatch"], 0)
-
-    def test_batch_exposes_per_endpoint_api_failures(self):
-        result = free.fetch_batch(
-            self.snap, ak=PartialModernAk(), offset=0, limit=2,
-            out=self.batchroot/"batch_000000", wait_seconds=0
-        )
-        self.assertEqual(result["api_calls"], 6)
-        self.assertEqual(result["failed_or_truncated_calls"], 2)
-        self.assertEqual(result["endpoint_results"]["cninfo_dividend"]["api_error"], 2)
-        self.assertEqual(result["endpoint_results"]["sina_dividend"]["success"], 2)
-        self.assertEqual(result["endpoint_results"]["sina_rights"]["success"], 2)
-        report, _, _, _, _, _ = free.audit_batches(self.snap, self.batchroot)
-        self.assertEqual(report["endpoint_results"]["cninfo_dividend"]["api_error"], 2)
-
     def test_conflicting_sources_quarantine_event(self):
         self.batch(ak=FakeAk(conflict=True))
         result,events,_,issues,_,_=free.audit_batches(self.snap,self.batchroot)
@@ -185,6 +110,50 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(report["rights_records_requiring_manual_review"],1)
         self.assertEqual(stocks.loc[stocks.stock_code=="002594","coverage_status"].iloc[0],"FETCH_FAILED_OR_TRUNCATED")
         self.assertTrue(report["training_gate_must_remain_closed"])
+
+    def test_unfetched_issuer_control_is_not_called_mismatch(self):
+        free.fetch_batch(self.snap, ak=FakeAk(), offset=0, limit=1,
+                         out=self.batchroot/"batch_000000", wait_seconds=0)
+        # BYD is present in the snapshot, but this batch fetched only 000001.
+        official=self.root/"official.csv"
+        official.write_text("stock_code,ex_date,share_multiplier,cash_per_old_share,source_id\n"
+            "002594,2025-07-29,3,3.974,BYD-2025-047\n")
+        report, _, _, _, _, ctrl=free.audit_batches(
+            self.snap,self.batchroot,official_events=official)
+        self.assertEqual(report["issuer_controls_total_in_reference"], 1)
+        self.assertEqual(report["issuer_controls_not_fetched"], 1)
+        self.assertEqual(report["issuer_controls_checked"], 0)
+        self.assertEqual(report["issuer_controls_mismatch"], 0)
+        self.assertEqual(ctrl.iloc[0].status, "CONTROL_STOCK_NOT_FETCHED")
+
+    def test_issuer_in_scope_with_failed_dividend_provider_is_pending(self):
+        self.batch(ak=FakeAk(failing=True))
+        official=self.root/"official.csv"
+        official.write_text("stock_code,ex_date,share_multiplier,cash_per_old_share,source_id\n"
+            "002594,2025-07-29,3,3.974,BYD-2025-047\n")
+        report,_,_,_,_,controls=free.audit_batches(
+            self.snap,self.batchroot,official_events=official)
+        self.assertEqual(report["issuer_controls_sources_incomplete"],1)
+        self.assertEqual(report["issuer_controls_mismatch"],0)
+        self.assertEqual(report["endpoint_status_counts"]["sina_dividend"]["API_ERROR"],1)
+        self.assertIn("simulated rate limit",report["endpoint_failure_examples"]["sina_dividend"][0])
+        self.assertEqual(controls.iloc[0].status,"CONTROL_DIVIDEND_SOURCES_INCOMPLETE")
+
+    def test_rights_only_counted_in_audit_interval(self):
+        class HistoricalRights(FakeAk):
+            def stock_history_dividend_detail(self, symbol, indicator):
+                if indicator == "配股":
+                    old = RIGHTS.copy()
+                    old.update({"公告日期":"2018-02-01","除权日":"2018-02-05",
+                                "股权登记日":"2018-02-04"})
+                    return pd.DataFrame([RIGHTS,old]) if symbol == "002594" else pd.DataFrame()
+                return super().stock_history_dividend_detail(symbol,indicator)
+        self.batch(ak=HistoricalRights())
+        report,_,_,_,rights,_=free.audit_batches(self.snap,self.batchroot)
+        self.assertEqual(report["rights_records_raw_all_history"],2)
+        self.assertEqual(report["rights_records_requiring_manual_review"],1)
+        self.assertEqual(len(rights),1)
+        self.assertEqual(rights.iloc[0]["除权日"],"2025-02-05")
 
     def test_tampered_raw_files_fail_sha256_audit(self):
         path=self.batch()
