@@ -116,7 +116,17 @@ def _endpoint(provider, code: str, endpoint: str) -> pd.DataFrame:
     if endpoint == "sina_rights":
         return provider.stock_history_dividend_detail(symbol=code, indicator="配股")
     if endpoint == "cninfo_dividend":
-        return provider.stock_dividents_cninfo(symbol=code)
+        # AkShare renamed its historical misspelled interface. Prefer the
+        # current singular spelling but retain older-version compatibility.
+        get_cninfo = getattr(provider, "stock_dividend_cninfo", None)
+        if not callable(get_cninfo):
+            get_cninfo = getattr(provider, "stock_dividents_cninfo", None)
+        if not callable(get_cninfo):
+            raise AttributeError(
+                "AkShare CNINFO dividend interface missing: "
+                "expected stock_dividend_cninfo (or legacy stock_dividents_cninfo)"
+            )
+        return get_cninfo(symbol=code)
     raise ValueError(f"Unsupported endpoint: {endpoint}")
 
 
@@ -361,17 +371,33 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
     controls = []
     if official_events is not None:
         known = _read(official_events)
+        stock_fetch_status = stock.set_index("stock_code")["coverage_status"]
         for row in known.to_dict("records"):
             day = valid_day(row["ex_date"])
             if not (valid_day(meta["start"]) <= day < valid_day(meta["test_start_EXCLUDED"])):
                 continue
-            match = events.loc[events.stock_code.eq(str(row["stock_code"])) & events.ex_date.eq(str(day.date()))]
-            good = (len(match)==1 and
-                    np.isclose(float(match.iloc[0].share_multiplier), float(row["share_multiplier"]), rtol=0, atol=1e-6) and
-                    np.isclose(float(match.iloc[0].cash_per_old_share), float(row["cash_per_old_share"]), rtol=0, atol=1e-6))
-            controls.append({"stock_code":row["stock_code"], "ex_date":str(day.date()),
+            reference_code = str(row["stock_code"])
+            fetch_status = stock_fetch_status.get(reference_code, "NOT_FETCHED")
+            if fetch_status == "NOT_FETCHED":
+                control_status = "NOT_FETCHED_FOR_CONTROL"
+            elif fetch_status != "FETCHED_NOT_VERIFIED":
+                control_status = "INCOMPLETE_FETCH_FOR_CONTROL"
+            else:
+                match = events.loc[
+                    events.stock_code.eq(reference_code) &
+                    events.ex_date.eq(str(day.date()))
+                ]
+                good = (len(match) == 1 and
+                        np.isclose(float(match.iloc[0].share_multiplier),
+                                   float(row["share_multiplier"]), rtol=0, atol=1e-6) and
+                        np.isclose(float(match.iloc[0].cash_per_old_share),
+                                   float(row["cash_per_old_share"]), rtol=0, atol=1e-6))
+                control_status = ("MATCHED_ISSUER_CONTROL" if good
+                                  else "MISSING_OR_CONFLICTING")
+            controls.append({"stock_code":reference_code,
+                             "ex_date":str(day.date()),
                              "reference_id":row.get("source_id",""),
-                             "status":"MATCHED_ISSUER_CONTROL" if good else "MISSING_OR_CONFLICTING"})
+                             "status":control_status})
     official = pd.DataFrame(controls, columns=["stock_code","ex_date","reference_id","status"])
     report = {"audit_version":"P4_AKSHARE_NO_TOKEN_COVERAGE_V1",
         "snapshot_sha256":meta["universe_sha256"],
@@ -384,7 +410,10 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
         "cross_source_conflicts_or_invalid_rows":len(issues),
         "rights_records_requiring_manual_review":len(rights_rows),
         "issuer_controls_checked":len(official),
-        "issuer_controls_mismatch":int(official.status.ne("MATCHED_ISSUER_CONTROL").sum()),
+        "issuer_controls_mismatch":int(official.status.eq("MISSING_OR_CONFLICTING").sum()),
+        "issuer_controls_not_fetched":int(official.status.eq("NOT_FETCHED_FOR_CONTROL").sum()),
+        "issuer_controls_incomplete_fetch":int(official.status.eq("INCOMPLETE_FETCH_FOR_CONTROL").sum()),
+        "issuer_controls_matched":int(official.status.eq("MATCHED_ISSUER_CONTROL").sum()),
         "complete_verified_assertions_created":0,
         "full_historical_action_coverage_certified":False,
         "training_gate_must_remain_closed":True,
