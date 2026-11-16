@@ -116,3 +116,46 @@ python -u -m ashare.p4_action_feed_free audit \
 ```
 
 只有当新 `audit_retry_20261116/feed_coverage_audit.json` 的 `endpoint_results` 显示三个数据源都成功，相关股票的 `coverage_by_stock.csv` 才从 `FETCH_FAILED_OR_TRUNCATED` 转为 `FETCHED_NOT_VERIFIED`；**即使三源均成功，也不会成为 `COMPLETE_VERIFIED`**。配股历史的行数不是已确认配股事件数量；原有 4 条 `audit_issues` 必须看具体 `reason` 再判定是源字段无效还是跨源矛盾。不要直接对 5,449 只股票发起 16,347 次请求，先确认免费接口稳定性和服务条款。
+
+## 2026-11-16：AkShare 1.20.65 单股巨潮日期字段 KeyError
+
+用户的 Ubuntu 真实运行（`ashare-dev@7dac7c8464497ff1509ac1ec1165e12654bd6029`，AkShare `1.20.65`）显示：11 项原有单测通过，头 10 只股票的三源接口 **29/30** 成功，其中新浪分红/配股各 10/10，巨潮分红 9/10；股票级 `9 FETCHED_NOT_VERIFIED`、`1 FETCH_FAILED_OR_TRUNCATED`。另有四条未核实候选、五条无效或冲突记录，`COMPLETE_VERIFIED=0`，质量闸门应维持关闭。
+
+剩余巨潮错误为 `KeyError: '实施方案公告日期'`。查阅 [AkShare 开源实现](https://github.com/akfamily/akshare/blob/main/akshare/stock/issue/stock_dividend_cninfo.py)：该函数把 JSON `records` 变成 DataFrame 后直接读取 `实施方案公告日期`。所以报错可能源于 **`records=[]` 空响应或提供方字段变化**；单靠 KeyError **无法证明股票历史上确无分红**。不得把异常转换为 `SUCCESS`、空已验证名录或 `COMPLETE_VERIFIED`。
+
+本次兼容补丁：
+
+- 对 **仅巨潮** 的该字段 KeyError 单独记录 `UPSTREAM_EMPTY_OR_SCHEMA`，明确是“上游数据不确定”，继续按非成功接口计入股票级 `FETCH_FAILED_OR_TRUNCATED`；其他 KeyError 仍记 `API_ERROR`，严禁静默放行。
+- 审计 JSON 增加 `cninfo_upstream_ambiguous_calls` 及每数据源至多 5 条 `endpoint_failure_stocks`（股票代码、状态、脱敏/截断后的错误），让单股异常可以直接定位。原有 `endpoint_failure_examples` 仍保留。
+- 单元测试新增两项：同名字段 KeyError 必须隔离并保留其他来源的 UNVERIFIED 候选；其他字段 KeyError 不应误归因成“空或结构变动”。之前已成功的 29 次接口调用不受修改影响。
+
+**执行顺序**：先检查旧的不可变批次，确认具体失败股票；完成 `git pull` 后只用新输出目录重试，绝不覆盖先前批次，也不能将三个重叠的 `batch_000000` 混在一个审计根目录。
+
+```bash
+cd ~/gcdev/alphagpt/AlphaGPT
+conda activate py312
+git switch ashare-dev && git pull --ff-only origin ashare-dev
+python -m unittest discover -s tests -p 'test_p4_action_feed_free.py' -v
+
+python - <<'PY'
+import pandas as pd
+p = "reports/ashare_p4_action_feed_free/batches_retry_fixed/batch_000000/request_ledger.csv"
+ledger = pd.read_csv(p, dtype={"stock_code": "string"}, keep_default_na=False)
+print(ledger.loc[ledger.status.ne("SUCCESS"),
+                 ["stock_code", "endpoint", "status", "error"]].to_string(index=False))
+PY
+
+META=reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json
+ROOT=reports/ashare_p4_action_feed_free
+SNAP=$ROOT/snapshot_2024-12-01_2026-06-11
+python -u -m ashare.p4_action_feed_free fetch \
+  --reference-metadata "$META" --snapshot "$SNAP" \
+  --offset 0 --limit 10 --wait-seconds 1.5 \
+  --out "$ROOT/batches_diagnostic_v2/batch_000000"
+python -u -m ashare.p4_action_feed_free audit \
+  --reference-metadata "$META" --snapshot "$SNAP" \
+  --batch-root "$ROOT/batches_diagnostic_v2" \
+  --out "$ROOT/audit_diagnostic_v2"
+```
+
+**验收**：即使这次返回 `UPSTREAM_EMPTY_OR_SCHEMA`，这也只是对供应商数据质量的正确表达，不等于修复上游数据或提升到 30/30；应暂不扩大至全市场批量。进一步检查该股的官方历史实施公告或选择第三个独立免费源交叉核对。不要修改 `stock_scripts` 的生产行情任务。
