@@ -337,3 +337,25 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["paused_sources"], {})
         self.assertTrue(summary["scope_ready_for_review"])
+
+    def test_phase3_recovery_requires_provider_login_and_preserves_other_circuits(self):
+        from ashare import p4_action_phase3_recovery as recovery
+
+        cp = {"state": "WAITING_FOR_SOURCES", "offset": 0, "limit": 5449,
+              "paused_sources": {p.BAO: {"reason": "TIMEOUT"}}}
+        p.atomic_json(self.output / "checkpoint.json", cp)
+        with patch.object(recovery, "probe_login", return_value=False) as probe, patch.object(
+                recovery.subprocess, "run") as resume:
+            self.assertEqual(recovery.resume_after_login(self.output, 2700, 1), 2)
+            probe.assert_called_once()
+            resume.assert_not_called()
+        with patch.object(recovery, "probe_login", return_value=True), patch.object(
+                recovery.subprocess, "run") as resume:
+            resume.return_value.returncode = 0
+            self.assertEqual(recovery.resume_after_login(self.output, 2700, 1), 0)
+            self.assertIn("--restore-source", resume.call_args.args[0])
+        cp["paused_sources"]["cninfo"] = {"reason": "RATE_LIMIT"}
+        p.atomic_json(self.output / "checkpoint.json", cp)
+        with patch.object(recovery, "probe_login") as probe:
+            self.assertEqual(recovery.resume_after_login(self.output, 2700, 1), 2)
+            probe.assert_not_called()
