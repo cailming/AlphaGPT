@@ -307,6 +307,14 @@ python -u -m ashare.p4_corporate_actions \
 
 **复核流程**：先用旧 `request_ledger.csv` 中 `endpoint`/`status`/`error` 确定十次实际报错的来源，然后保留旧快照，在全新的 `batches_retry_20261116` 根目录重新抓前 10 只并审计。不可直接重复写入原 `batches/batch_000000`（不可变快照），也不可让新旧重试批次混入同一根目录使同股票/接口重复。命令、注意事项及解释见 [P4.3-E2 免费接入说明](ashare/P4_3_E2_FREE_FEED.md)。当前未重新访问用户 Ubuntu，**不声称新接口已在真实网络中验证成功**；继续不自动发放 `COMPLETE_VERIFIED` 或训练标签。
 
+### P4.3-E2 免费 AkShare 首批运行诊断与兼容修复（2026-11-16）
+
+Ubuntu 真实运行：`test_p4_action_feed_free.py` 旧版 7/7 通过；正式行情历史股票范围 5,449 只（只表示 DB 内有记录，不是交易所全集）；前 10 只股票 × 新浪分红/巨潮分红/新浪配股各 1 次 = 30 请求，**20 SUCCESS、10 失败或达到返回上限**，因此 10 只均标 `FETCH_FAILED_OR_TRUNCATED`，其余 5,439 只为 `NOT_FETCHED`。4 条未核候选权益、4 条源冲突/无效记录，不能直接并入已核公司行为清单。**仅凭总数还无法确认哪一接口失败**，须查看原批次 `request_ledger.csv` 分组以及每条 `error`。
+
+发现并修复：原免费适配器巨潮方法使用了旧拼写 `stock_dividents_cninfo`；优先调用 AkShare 当前 `stock_dividend_cninfo`，兼容旧包装。官方比亚迪公告控制样本尚未抓取时不再误报为真正 mismatch；区分 `NOT_FETCHED_FOR_CONTROL`、`INCOMPLETE_FETCH_FOR_CONTROL`、`MISSING_OR_CONFLICTING`。配股危险事件只统计请求范围内的除权日，保留全历史原始条数供核对；新版审计 JSON 新增 `endpoint_results`（每接口成功/失败分布）、`endpoint_failure_examples`。**11 项本地合成回归测试通过**，GitHub 上源码与测试的 blob SHA 与本地测试版本完全一致，但这不能替代 Ubuntu 真实接口复测。
+
+旧 `snapshot` / `batch_000000` / `audit_first_batch` 都不可覆盖。先读取 `batches/batch_000000/request_ledger.csv` 确认错误原因，再用 `batch_root=batches_retry_20261116` 的新路径重抓 10 只，并输出到 `audit_retry_20261116`。重测方法与完整命令见 [P4.3-E2 免费接入说明](ashare/P4_3_E2_FREE_FEED.md)。**未产生 `COMPLETE_VERIFIED` 或任何可训练经济收益标签，模型训练闸门继续关闭**。
+
 ### P4 当前已实现的研究契约
 
 当前 `970151c` 提交已经包含 P4 MVP，而非需要从零开发：
