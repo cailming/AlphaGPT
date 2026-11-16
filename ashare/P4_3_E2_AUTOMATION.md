@@ -49,3 +49,12 @@ conda run -n py312 python -m unittest discover -s tests -p 'test_p4_action_*.py'
 前置账本去重后，32,694 个任务中有 603 个成功可复用（其中 38 个来自试点范围之外）、36 个历史终态异常、32,055 个尚未处理。其中 846 个 BaoStock 任务的股票代码缺乏已验证的交易所映射，按本地终态归档。其余首轮最多 31,209 个查询任务，重试按实际响应追加。全部回归通过后使用 `run --full` 写入全市场检查点，断线后通过持久化日志查看，确需进程恢复时沿用 `resume`。
 
 新账本分别记录缺失或无效的除权日和公告日计数。旧试点中只有合并状态的日期异常单列为无法拆分，历史原始证据照常保留。绝对完整性异常触发停机，普通字段问题、明确不支持、空返回和单源记录保留各自结论。整个阶段 `training_gate=CLOSED`。
+
+`resume --isolate-circuit` 保留已诊断的来源熔断，允许其他来源继续。被隔离任务保留未抓取或待重试状态。全量采集会保持未完成，直到能独立验证服务恢复并执行 `resume --restore-source <source>`。股票身份不一致、SHA256 等 P0 先处理完整性问题。
+
+```bash
+conda run -n py312 python -m ashare.p4_action_phase3_audit
+conda run -n py312 python -m ashare.p4_action_phase3_audit --final
+```
+
+进度报告复算截至最近一份累计审计的任务、股票、空表和优先级。异常画像分开计量请求、来源记录和权益字段，并产出发行人公告核验及来源排查队列。最终报告要求全量检查点完成、无在途问题且训练闸门关闭。

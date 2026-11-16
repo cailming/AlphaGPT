@@ -285,3 +285,55 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(summary["p0_exceptions"], 1)
         self.assertEqual(summary["circuit"]["reason"], "WRONG_STOCK_CODE")
         self.assertEqual(summary["training_gate"], "CLOSED")
+
+    def test_governance_recomputes_and_refuses_incomplete_final(self):
+        from ashare import p4_action_phase3_audit as governance
+
+        def provider(task):
+            if task.endpoint == "sina_dividend":
+                return {"status": "UNKNOWN_EX_DATE", "response_rows": 2,
+                        "missing_ex_date_rows": 2, "missing_announcement_date_rows": 1}, []
+            return self.success(task)
+
+        self.first_run(provider, limit="1")
+        report_path = governance.generate(self.output, final=False)
+        self.assertIn("缺除权日 2 行", report_path.read_text())
+        self.assertIn("training_gate=CLOSED", report_path.read_text())
+        pointer = p.read_json(self.output / "latest_governance.json")
+        profile = pd.read_csv(Path(pointer["governance_dir"]) / "anomaly_profile.csv")
+        missing = profile.loc[profile.category.eq("MISSING_EX_DATE")]
+        self.assertEqual(missing.occurrences.iloc[0], 2)
+        with self.assertRaisesRegex(p.EvidenceError, "5,449-stock"):
+            governance.generate(self.output, final=True)
+        report_dir = Path(p.read_json(self.output / "latest_report.json")["report_dir"])
+        request_csv = report_dir / "request_status.csv"
+        request_csv.write_text(request_csv.read_text().replace("TERMINAL_EXCEPTION", "NOT_FETCHED", 1))
+        with self.assertRaisesRegex(p.EvidenceError, "Request CSV and summary disagree"):
+            governance.generate(self.output, final=False)
+
+    def test_paused_source_stays_pending_while_other_sources_finish(self):
+        def provider(task):
+            if task.endpoint == p.BAO:
+                return {"status": "API_ERROR", "error": "HTTP 429 Too Many Requests"}, []
+            return self.success(task)
+
+        summary, code = self.first_run(provider)
+        self.assertEqual(code, 2)
+        self.assertEqual(summary["circuit"]["source"], p.BAO)
+
+        def healthy_only(task):
+            self.assertNotEqual(task.endpoint, p.BAO)
+            return self.success(task)
+
+        summary, code = self.run_pipeline("resume", healthy_only, "--isolate-circuit")
+        self.assertEqual(code, 2)
+        self.assertEqual(summary["effective_successes"], 6)
+        self.assertEqual(summary["paused_sources"][p.BAO]["reason"], "RATE_LIMIT")
+        self.assertEqual(summary["pending_retries"], 1)
+        self.assertFalse(summary["scope_ready_for_review"])
+        self.assertEqual(p.read_json(self.output / "checkpoint.json")["state"], "WAITING_FOR_SOURCES")
+
+        summary, code = self.run_pipeline("resume", self.success, "--restore-source", p.BAO)
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["paused_sources"], {})
+        self.assertTrue(summary["scope_ready_for_review"])

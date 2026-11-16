@@ -551,6 +551,7 @@ def write_report(evidence, codes, checkpoint):
             controls = pd.concat([controls.loc[~controls.stock_code.isin(old_codes)], historical_controls],
                                  ignore_index=True)
     circuit = checkpoint.get("circuit")
+    paused_sources = checkpoint.get("paused_sources", {})
     summary = {
         **evidence.identity, "as_of_utc": pd.Timestamp.now(tz="UTC").isoformat(),
         "snapshot_stocks": len(evidence.codes), "stocks_in_scope": len(codes),
@@ -582,7 +583,9 @@ def write_report(evidence, codes, checkpoint):
         "historical_rights_rows_in_evidence": ak_report["rights_records_raw_all_history"],
         "high_priority_exceptions": int(exceptions.priority.isin(["P0", "P1"]).sum()),
         "p0_exceptions": p0, "old_test_isolation_passed": True, "circuit": circuit,
-        "scope_ready_for_review": bool(complete_requests + terminal == offered and not p0 and not circuit),
+        "paused_sources": paused_sources,
+        "scope_ready_for_review": bool(complete_requests + terminal == offered
+                                       and not p0 and not circuit and not paused_sources),
         "complete_verified_assertions_created": 0, "can_emit_training_labels": False,
         "training_gate": "CLOSED",
         "full_historical_action_coverage_certified": False,
@@ -635,6 +638,12 @@ def run(evidence, checkpoint, codes, provider):
     def save():
         atomic_json(checkpoint_path, checkpoint)
 
+    def available(task):
+        source = SOURCES[task.endpoint]
+        if source not in checkpoint.get("paused_sources", {}):
+            return True
+        return task.endpoint == BAO and bao._provider_code(task.stock_code) is None
+
     def collect_batch(tasks):
         for task in tasks:
             if stop or checkpoint.get("circuit"):
@@ -668,7 +677,7 @@ def run(evidence, checkpoint, codes, provider):
         for start in range(0, len(codes), args.batch_size):
             batch = codes[start:start + args.batch_size]
             pending = [task for code in batch for task in evidence.tasks(code)
-                       if evidence.state(task) in {"NOT_FETCHED", "RETRY_PENDING"}]
+                       if available(task) and evidence.state(task) in {"NOT_FETCHED", "RETRY_PENDING"}]
             if not pending:
                 continue
             if stop or checkpoint.get("circuit"):
@@ -686,6 +695,7 @@ def run(evidence, checkpoint, codes, provider):
             signal.signal(sig, handler)
     summary = write_report(evidence, codes, checkpoint)
     checkpoint["state"] = ("BLOCKED" if checkpoint.get("circuit") else "INTERRUPTED" if stop else
+                           "WAITING_FOR_SOURCES" if checkpoint.get("paused_sources") else
                            "DONE" if summary["scope_ready_for_review"] else "INCOMPLETE")
     save()
     return summary, checkpoint["state"]
@@ -720,13 +730,20 @@ def parse_args():
     parser.add_argument("--circuit-window", type=int)
     parser.add_argument("--error-rate", type=float)
     parser.add_argument("--min-free-mb", type=int)
-    parser.add_argument("--reset-circuit", action="store_true")
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--reset-circuit", action="store_true")
+    recovery.add_argument("--isolate-circuit", action="store_true",
+                          help="Keep the tripped source paused and run unaffected sources")
+    recovery.add_argument("--restore-source", choices=tuple(sorted(set(SOURCES.values()))),
+                          help="Re-enable a paused source after independently verifying recovery")
     args = parser.parse_args()
     if (args.offset is not None and args.offset < 0
             or args.limit is not None and args.limit < 1
             or args.full and (args.offset is not None or args.limit is not None)
             or args.command == "resume" and (args.full or args.offset is not None or args.limit is not None)):
         parser.error("Invalid scope")
+    if (args.isolate_circuit or args.restore_source) and (args.command != "resume" or args.dry_run):
+        parser.error("Source isolation and recovery require resume")
     return args
 
 
@@ -781,9 +798,25 @@ def configure(evidence, args):
         key = f"{task.stock_code}/{task.endpoint}/{task.year}"
         if attempt.number > checkpoint["attempt_numbers"].get(key, 0):
             track_attempt(checkpoint, args, attempt)
+    circuit = checkpoint.get("circuit")
     if args.reset_circuit and args.command in {"run", "resume"} and not args.dry_run:
+        if circuit and circuit["reason"] == "WRONG_STOCK_CODE":
+            raise EvidenceError("A security identity mismatch requires P0 investigation")
         checkpoint.pop("circuit", None)
         checkpoint["health_window"] = {}
+    if args.isolate_circuit:
+        if circuit is None:
+            raise ValueError("No active circuit to isolate")
+        if circuit["reason"] == "WRONG_STOCK_CODE" or (args.output / "p0_blocker.json").exists():
+            raise EvidenceError("P0 evidence must be resolved before continuing")
+        checkpoint.setdefault("paused_sources", {})[circuit["source"]] = circuit
+        del checkpoint["circuit"]
+    if args.restore_source:
+        paused = checkpoint.get("paused_sources", {})
+        if args.restore_source not in paused:
+            raise ValueError(f"Source is not paused: {args.restore_source}")
+        del paused[args.restore_source]
+        checkpoint["health_window"].pop(args.restore_source, None)
     return codes, checkpoint
 
 
@@ -795,6 +828,7 @@ def execute(args):
         return {"offset": checkpoint["offset"], "limit": len(codes),
                 "first_stock": codes[0], "last_stock": codes[-1],
                 "state": checkpoint["state"], "circuit": checkpoint.get("circuit"),
+                "paused_sources": checkpoint.get("paused_sources", {}),
                 "per_endpoint": status.groupby(["endpoint", "state"]).size().unstack(
                     fill_value=0).to_dict(orient="index")}, 0
     if checkpoint.get("circuit") and args.command in {"run", "resume"}:
