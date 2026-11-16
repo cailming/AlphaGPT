@@ -116,17 +116,7 @@ def _endpoint(provider, code: str, endpoint: str) -> pd.DataFrame:
     if endpoint == "sina_rights":
         return provider.stock_history_dividend_detail(symbol=code, indicator="配股")
     if endpoint == "cninfo_dividend":
-        # AkShare renamed its historical misspelled interface. Prefer the
-        # current singular spelling but retain older-version compatibility.
-        get_cninfo = getattr(provider, "stock_dividend_cninfo", None)
-        if not callable(get_cninfo):
-            get_cninfo = getattr(provider, "stock_dividents_cninfo", None)
-        if not callable(get_cninfo):
-            raise AttributeError(
-                "AkShare CNINFO dividend interface missing: "
-                "expected stock_dividend_cninfo (or legacy stock_dividents_cninfo)"
-            )
-        return get_cninfo(symbol=code)
+        return provider.stock_dividents_cninfo(symbol=code)
     raise ValueError(f"Unsupported endpoint: {endpoint}")
 
 
@@ -219,12 +209,6 @@ def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
         "offset": offset, "requested_symbols": len(chosen),
         "api_calls": len(ledger), "successful_calls": int(table.status.eq("SUCCESS").sum()),
         "failed_or_truncated_calls": int(table.status.ne("SUCCESS").sum()),
-        "endpoint_results": {
-            ep: {"success": int((table.endpoint.eq(ep) & table.status.eq("SUCCESS")).sum()),
-                 "api_error": int((table.endpoint.eq(ep) & table.status.eq("API_ERROR")).sum()),
-                 "row_limit": int((table.endpoint.eq(ep) & table.status.eq("ROW_LIMIT")).sum())}
-            for ep in ENDPOINTS
-        },
         "files_sha256": checksums, "provider": "AKSHARE_PUBLIC_SINA_AND_CNINFO",
         "coverage_certified": False, "warning": NOTE,
     }
@@ -363,7 +347,15 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
           "endpoint":"cross_source", "reason":item["reason"]} for item in conflicts])], ignore_index=True)
     if issues.empty:
         issues = pd.DataFrame(columns=["stock_code","endpoint","reason"])
-    rights_rows = allraw["sina_rights"].copy()
+    # A historical rights endpoint returns *all* past rights issues. Count
+    # relevant hazards only within the archived pre-test audit interval; keep
+    # older raw evidence in its immutable batch, not the active hazard count.
+    rights_history = allraw["sina_rights"].copy()
+    rights_dates = pd.to_datetime(rights_history["除权日"], errors="coerce")
+    rights_relevant = rights_dates.ge(valid_day(meta["start"])) & rights_dates.lt(
+        valid_day(meta["test_start_EXCLUDED"])
+    )
+    rights_rows = rights_history.loc[rights_relevant].copy()
     rights_rows["review_status"] = "RIGHTS_SUBSCRIPTION_UNSUPPORTED_FOR_ECONOMIC_LABEL"
     endpoints = ledger.pivot(index="stock_code", columns="endpoint", values="status")
     stock = universe.merge(endpoints.reset_index(), on="stock_code", how="left",validate="one_to_one")
@@ -377,55 +369,63 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
     controls = []
     if official_events is not None:
         known = _read(official_events)
-        stock_fetch_status = stock.set_index("stock_code")["coverage_status"]
         for row in known.to_dict("records"):
             day = valid_day(row["ex_date"])
             if not (valid_day(meta["start"]) <= day < valid_day(meta["test_start_EXCLUDED"])):
                 continue
-            reference_code = str(row["stock_code"])
-            fetch_status = stock_fetch_status.get(reference_code, "NOT_FETCHED")
-            if fetch_status == "NOT_FETCHED":
-                control_status = "NOT_FETCHED_FOR_CONTROL"
-            elif fetch_status != "FETCHED_NOT_VERIFIED":
-                control_status = "INCOMPLETE_FETCH_FOR_CONTROL"
+            match = events.loc[events.stock_code.eq(str(row["stock_code"])) & events.ex_date.eq(str(day.date()))]
+            # Reference issuer controls may be outside the chosen *first*
+            # batch. They are NOT mismatches until that stock's two dividend
+            # endpoints were actually queried successfully. Distinguish not
+            # fetched, partially fetched and genuine conflicting evidence.
+            symbol = str(row["stock_code"])
+            queried = stock.loc[stock.stock_code.eq(symbol)]
+            if queried.empty or queried[list(ENDPOINTS)].isna().all(axis=1).iloc[0]:
+                disposition = "CONTROL_STOCK_NOT_FETCHED"
+            elif not (queried.iloc[0]["sina_dividend"] == "SUCCESS" and
+                      queried.iloc[0]["cninfo_dividend"] == "SUCCESS"):
+                disposition = "CONTROL_DIVIDEND_SOURCES_INCOMPLETE"
             else:
-                match = events.loc[
-                    events.stock_code.eq(reference_code) &
-                    events.ex_date.eq(str(day.date()))
-                ]
-                good = (len(match) == 1 and
-                        np.isclose(float(match.iloc[0].share_multiplier),
-                                   float(row["share_multiplier"]), rtol=0, atol=1e-6) and
-                        np.isclose(float(match.iloc[0].cash_per_old_share),
-                                   float(row["cash_per_old_share"]), rtol=0, atol=1e-6))
-                control_status = ("MATCHED_ISSUER_CONTROL" if good
-                                  else "MISSING_OR_CONFLICTING")
-            controls.append({"stock_code":reference_code,
-                             "ex_date":str(day.date()),
+                good = (len(match)==1 and
+                        np.isclose(float(match.iloc[0].share_multiplier), float(row["share_multiplier"]), rtol=0, atol=1e-6) and
+                        np.isclose(float(match.iloc[0].cash_per_old_share), float(row["cash_per_old_share"]), rtol=0, atol=1e-6))
+                disposition = "MATCHED_ISSUER_CONTROL" if good else "MISSING_OR_CONFLICTING"
+            controls.append({"stock_code":symbol, "ex_date":str(day.date()),
                              "reference_id":row.get("source_id",""),
-                             "status":control_status})
+                             "status":disposition})
     official = pd.DataFrame(controls, columns=["stock_code","ex_date","reference_id","status"])
+    # Retain the per-endpoint failure distribution in the report so a 20/30
+    # overall success figure cannot conceal one systematically blocked API.
+    endpoint_counts = {
+        endpoint: {str(status): int((ledger.loc[ledger.endpoint.eq(endpoint), "status"] == status).sum())
+                   for status in sorted(ledger.status.unique())}
+        for endpoint in ENDPOINTS
+    }
+    endpoint_error_examples = {
+        endpoint: ledger.loc[ledger.endpoint.eq(endpoint) & ledger.status.ne("SUCCESS"),
+                             "error"].dropna().astype(str).head(2).tolist()
+        for endpoint in ENDPOINTS
+    }
     report = {"audit_version":"P4_AKSHARE_NO_TOKEN_COVERAGE_V1",
         "snapshot_sha256":meta["universe_sha256"],
         "test_start_EXCLUDED":meta["test_start_EXCLUDED"],
         "expected_stocks":len(stock),
-        "endpoint_results":{
-            ep:{"success":int((ledger.endpoint.eq(ep) & ledger.status.eq("SUCCESS")).sum()),
-                "api_error":int((ledger.endpoint.eq(ep) & ledger.status.eq("API_ERROR")).sum()),
-                "row_limit":int((ledger.endpoint.eq(ep) & ledger.status.eq("ROW_LIMIT")).sum())}
-            for ep in ENDPOINTS
-        },
         "not_fetched":int(stock.coverage_status.eq("NOT_FETCHED").sum()),
         "failed_or_truncated":int(stock.coverage_status.eq("FETCH_FAILED_OR_TRUNCATED").sum()),
         "fetched_not_verified":int(stock.coverage_status.eq("FETCHED_NOT_VERIFIED").sum()),
         "unverified_normalized_candidate_events":len(events),
         "cross_source_conflicts_or_invalid_rows":len(issues),
         "rights_records_requiring_manual_review":len(rights_rows),
-        "issuer_controls_checked":len(official),
+        "rights_records_raw_all_history":len(rights_history),
+        "rights_records_with_invalid_or_missing_ex_date":int(rights_dates.isna().sum()),
+        "endpoint_status_counts":endpoint_counts,
+        "endpoint_failure_examples":endpoint_error_examples,
+        "issuer_controls_total_in_reference":len(official),
+        "issuer_controls_checked":int(official.status.isin(
+            ["MATCHED_ISSUER_CONTROL", "MISSING_OR_CONFLICTING"]).sum()),
+        "issuer_controls_not_fetched":int(official.status.eq("CONTROL_STOCK_NOT_FETCHED").sum()),
+        "issuer_controls_sources_incomplete":int(official.status.eq("CONTROL_DIVIDEND_SOURCES_INCOMPLETE").sum()),
         "issuer_controls_mismatch":int(official.status.eq("MISSING_OR_CONFLICTING").sum()),
-        "issuer_controls_not_fetched":int(official.status.eq("NOT_FETCHED_FOR_CONTROL").sum()),
-        "issuer_controls_incomplete_fetch":int(official.status.eq("INCOMPLETE_FETCH_FOR_CONTROL").sum()),
-        "issuer_controls_matched":int(official.status.eq("MATCHED_ISSUER_CONTROL").sum()),
         "complete_verified_assertions_created":0,
         "full_historical_action_coverage_certified":False,
         "training_gate_must_remain_closed":True,
