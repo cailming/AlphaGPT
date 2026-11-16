@@ -111,6 +111,24 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(stocks.loc[stocks.stock_code=="002594","coverage_status"].iloc[0],"FETCH_FAILED_OR_TRUNCATED")
         self.assertTrue(report["training_gate_must_remain_closed"])
 
+    def test_prefer_canonical_akshare_cninfo_method(self):
+        class ModernAk(FakeAk):
+            def stock_dividend_cninfo(self, symbol):
+                self.canonical_called = True
+                return super().stock_dividents_cninfo(symbol)
+            def stock_dividents_cninfo(self, symbol):
+                # Overridden below via parent method explicitly; ensure the
+                # live adapter never calls this misspelled method directly.
+                raise AssertionError("legacy CNINFO name should not be invoked")
+        # Implement modern method without touching the legacy callable.
+        provider=ModernAk()
+        provider.stock_dividend_cninfo=lambda symbol: FakeAk.stock_dividents_cninfo(provider,symbol)
+        self.batch(ak=provider)
+        report,events,stocks,issues,rights,ctrl=free.audit_batches(self.snap,self.batchroot)
+        self.assertEqual(report["fetched_not_verified"],2)
+        self.assertEqual(len(events),1)
+        self.assertEqual(report["endpoint_results"]["cninfo_dividend"]["SUCCESS"],2)
+
     def test_unfetched_issuer_control_is_not_called_mismatch(self):
         free.fetch_batch(self.snap, ak=FakeAk(), offset=0, limit=1,
                          out=self.batchroot/"batch_000000", wait_seconds=0)
@@ -124,7 +142,7 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(report["issuer_controls_not_fetched"], 1)
         self.assertEqual(report["issuer_controls_checked"], 0)
         self.assertEqual(report["issuer_controls_mismatch"], 0)
-        self.assertEqual(ctrl.iloc[0].status, "CONTROL_STOCK_NOT_FETCHED")
+        self.assertEqual(ctrl.iloc[0].status, "NOT_FETCHED_FOR_CONTROL")
 
     def test_issuer_in_scope_with_failed_dividend_provider_is_pending(self):
         self.batch(ak=FakeAk(failing=True))
@@ -137,7 +155,7 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(report["issuer_controls_mismatch"],0)
         self.assertEqual(report["endpoint_status_counts"]["sina_dividend"]["API_ERROR"],1)
         self.assertIn("simulated rate limit",report["endpoint_failure_examples"]["sina_dividend"][0])
-        self.assertEqual(controls.iloc[0].status,"CONTROL_DIVIDEND_SOURCES_INCOMPLETE")
+        self.assertEqual(controls.iloc[0].status,"INCOMPLETE_FETCH_FOR_CONTROL")
 
     def test_rights_only_counted_in_audit_interval(self):
         class HistoricalRights(FakeAk):
