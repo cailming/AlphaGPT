@@ -116,7 +116,14 @@ def _endpoint(provider, code: str, endpoint: str) -> pd.DataFrame:
     if endpoint == "sina_rights":
         return provider.stock_history_dividend_detail(symbol=code, indicator="配股")
     if endpoint == "cninfo_dividend":
-        return provider.stock_dividents_cninfo(symbol=code)
+        # Modern AKShare exposes stock_dividend_cninfo (singular). Some older
+        # wrappers used the historic misspelling; prefer the canonical API.
+        method = getattr(provider, "stock_dividend_cninfo", None)
+        if method is None:
+            method = getattr(provider, "stock_dividents_cninfo", None)
+        if method is None:
+            raise AttributeError("AkShare lacks stock_dividend_cninfo; upgrade akshare")
+        return method(symbol=code)
     raise ValueError(f"Unsupported endpoint: {endpoint}")
 
 
@@ -381,10 +388,10 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
             symbol = str(row["stock_code"])
             queried = stock.loc[stock.stock_code.eq(symbol)]
             if queried.empty or queried[list(ENDPOINTS)].isna().all(axis=1).iloc[0]:
-                disposition = "CONTROL_STOCK_NOT_FETCHED"
+                disposition = "NOT_FETCHED_FOR_CONTROL"
             elif not (queried.iloc[0]["sina_dividend"] == "SUCCESS" and
                       queried.iloc[0]["cninfo_dividend"] == "SUCCESS"):
-                disposition = "CONTROL_DIVIDEND_SOURCES_INCOMPLETE"
+                disposition = "INCOMPLETE_FETCH_FOR_CONTROL"
             else:
                 good = (len(match)==1 and
                         np.isclose(float(match.iloc[0].share_multiplier), float(row["share_multiplier"]), rtol=0, atol=1e-6) and
@@ -419,12 +426,13 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
         "rights_records_raw_all_history":len(rights_history),
         "rights_records_with_invalid_or_missing_ex_date":int(rights_dates.isna().sum()),
         "endpoint_status_counts":endpoint_counts,
+        "endpoint_results":endpoint_counts,
         "endpoint_failure_examples":endpoint_error_examples,
         "issuer_controls_total_in_reference":len(official),
         "issuer_controls_checked":int(official.status.isin(
             ["MATCHED_ISSUER_CONTROL", "MISSING_OR_CONFLICTING"]).sum()),
-        "issuer_controls_not_fetched":int(official.status.eq("CONTROL_STOCK_NOT_FETCHED").sum()),
-        "issuer_controls_sources_incomplete":int(official.status.eq("CONTROL_DIVIDEND_SOURCES_INCOMPLETE").sum()),
+        "issuer_controls_not_fetched":int(official.status.eq("NOT_FETCHED_FOR_CONTROL").sum()),
+        "issuer_controls_sources_incomplete":int(official.status.eq("INCOMPLETE_FETCH_FOR_CONTROL").sum()),
         "issuer_controls_mismatch":int(official.status.eq("MISSING_OR_CONFLICTING").sum()),
         "complete_verified_assertions_created":0,
         "full_historical_action_coverage_certified":False,
