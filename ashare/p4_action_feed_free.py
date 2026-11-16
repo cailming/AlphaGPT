@@ -219,6 +219,12 @@ def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
         "offset": offset, "requested_symbols": len(chosen),
         "api_calls": len(ledger), "successful_calls": int(table.status.eq("SUCCESS").sum()),
         "failed_or_truncated_calls": int(table.status.ne("SUCCESS").sum()),
+        "endpoint_results": {
+            ep: {"success": int((table.endpoint.eq(ep) & table.status.eq("SUCCESS")).sum()),
+                 "api_error": int((table.endpoint.eq(ep) & table.status.eq("API_ERROR")).sum()),
+                 "row_limit": int((table.endpoint.eq(ep) & table.status.eq("ROW_LIMIT")).sum())}
+            for ep in ENDPOINTS
+        },
         "files_sha256": checksums, "provider": "AKSHARE_PUBLIC_SINA_AND_CNINFO",
         "coverage_certified": False, "warning": NOTE,
     }
@@ -403,6 +409,12 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
         "snapshot_sha256":meta["universe_sha256"],
         "test_start_EXCLUDED":meta["test_start_EXCLUDED"],
         "expected_stocks":len(stock),
+        "endpoint_results":{
+            ep:{"success":int((ledger.endpoint.eq(ep) & ledger.status.eq("SUCCESS")).sum()),
+                "api_error":int((ledger.endpoint.eq(ep) & ledger.status.eq("API_ERROR")).sum()),
+                "row_limit":int((ledger.endpoint.eq(ep) & ledger.status.eq("ROW_LIMIT")).sum())}
+            for ep in ENDPOINTS
+        },
         "not_fetched":int(stock.coverage_status.eq("NOT_FETCHED").sum()),
         "failed_or_truncated":int(stock.coverage_status.eq("FETCH_FAILED_OR_TRUNCATED").sum()),
         "fetched_not_verified":int(stock.coverage_status.eq("FETCHED_NOT_VERIFIED").sum()),
