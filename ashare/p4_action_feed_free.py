@@ -189,8 +189,20 @@ def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
                         kept.insert(0, "request_code", str(code))
                         raws[endpoint].append(kept)
             except Exception as exc:
-                status = "API_ERROR"
-                error = f"{type(exc).__name__}: {str(exc)[:200]}"
+                # AKShare's CNINFO parser directly indexes the announcement
+                # column after DataFrame(records). A KeyError may mean either
+                # records=[] OR a provider schema change. We cannot distinguish
+                # these from the parser exception alone: never call it SUCCESS
+                # and NEVER infer that this stock had no corporate actions.
+                if (endpoint == "cninfo_dividend" and isinstance(exc, KeyError)
+                        and "实施方案公告日期" in str(exc)):
+                    status = "UPSTREAM_EMPTY_OR_SCHEMA"
+                    error = ("CNINFO parser could not locate 实施方案公告日期; "
+                             "upstream may have zero records or schema drift; "
+                             "not a verified empty action history")
+                else:
+                    status = "API_ERROR"
+                    error = f"{type(exc).__name__}: {str(exc)[:200]}"
             ledger.append({"stock_code": code, "endpoint": endpoint,
                            "status": status, "response_rows": rows,
                            "dropped_future_or_invalid": dropped, "error": error})
@@ -428,6 +440,21 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
         "endpoint_status_counts":endpoint_counts,
         "endpoint_results":endpoint_counts,
         "endpoint_failure_examples":endpoint_error_examples,
+        "endpoint_failure_stocks": {
+            ep: [
+                {"stock_code": str(rec.stock_code), "status": str(rec.status),
+                 "error": str(rec.error)[:200]}
+                for rec in ledger.loc[
+                    ledger.endpoint.eq(ep) & ledger.status.ne("SUCCESS"),
+                    ["stock_code", "status", "error"]
+                ].head(5).itertuples(index=False)
+            ]
+            for ep in ENDPOINTS
+        },
+        "cninfo_upstream_ambiguous_calls": int(
+            (ledger.endpoint.eq("cninfo_dividend") &
+             ledger.status.eq("UPSTREAM_EMPTY_OR_SCHEMA")).sum()
+        ),
         "issuer_controls_total_in_reference":len(official),
         "issuer_controls_checked":int(official.status.isin(
             ["MATCHED_ISSUER_CONTROL", "MISSING_OR_CONFLICTING"]).sum()),
