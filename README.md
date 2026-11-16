@@ -299,6 +299,14 @@ python -u -m ashare.p4_corporate_actions \
 
 推荐试点及完整命令：[**P4.3-E2 无 Token AkShare 操作说明**](ashare/P4_3_E2_FREE_FEED.md)。试点前只需 `python -m pip install akshare`，无须配置任何 Token；此前 [Tushare 方案](ashare/P4_3_E2_FEED.md)仅作为可选替代。
 
+### P4.3-E2 免费 AkShare 首批真实运行兼容修复（2026-11-16）
+
+用户在 Ubuntu 已通过免费数据源模块原有 7 项单测，并运行基于 `public.market` 的 5,449 股票历史快照、前 10 股票 30 次接口调用（成功 20、失败/截断 10）以及首批覆盖审计。初审 `not_fetched=5439`、`failed_or_truncated=10`、`fetched_not_verified=0` 属于**三个子接口中任一失败就整只股票未完成**的设计；`4` 个事件候选、`4` 条冲突或无效行、`20` 条配股待复核原始记录均未取得完整证明，不能进入模型训练。旧日志中比亚迪官方控制案例 1 项未匹配，因其未被前 10 股票批次抓取而可能被误计为冲突，不能当作已确认数据错误。
+
+**代码修复**：`ashare/p4_action_feed_free.py` 优先使用当期 AkShare `stock_dividend_cninfo`（单数），并兼容历史 `stock_dividents_cninfo`（旧拼写）；原实现仅使用旧拼写，可能导致全部巨潮接口失败。新增每个子接口独立的成功、API 错误、行数限制统计 `endpoint_results`；公告对照结果现在区分 `NOT_FETCHED_FOR_CONTROL`、`INCOMPLETE_FETCH_FOR_CONTROL` 与 `MISSING_OR_CONFLICTING`，不再将“没抓比亚迪”计为条款冲突。新增回归测试，现该模块共 11 项测试（仍须在用户 Ubuntu 重测）。
+
+**复核流程**：先用旧 `request_ledger.csv` 中 `endpoint`/`status`/`error` 确定十次实际报错的来源，然后保留旧快照，在全新的 `batches_retry_20261116` 根目录重新抓前 10 只并审计。不可直接重复写入原 `batches/batch_000000`（不可变快照），也不可让新旧重试批次混入同一根目录使同股票/接口重复。命令、注意事项及解释见 [P4.3-E2 免费接入说明](ashare/P4_3_E2_FREE_FEED.md)。当前未重新访问用户 Ubuntu，**不声称新接口已在真实网络中验证成功**；继续不自动发放 `COMPLETE_VERIFIED` 或训练标签。
+
 ### P4 当前已实现的研究契约
 
 当前 `970151c` 提交已经包含 P4 MVP，而非需要从零开发：
