@@ -201,6 +201,56 @@ class BaoTests(unittest.TestCase):
                          "BAOSTOCK_PARTIAL_AMOUNT_FIELDS_UNVERIFIED")
         self.assertIn("dividStocksPs", events.iloc[0].blank_amount_fields)
 
+    def test_partial_fields_are_not_fully_corrob_even_when_placeholder_matches(self):
+        # The blank capitalization column is UNKNOWN, not a confirmed zero.
+        row = BYD | {"dividStocksPs": "0", "dividReserveToStockPs": "",
+                     "dividCashPsBeforeTax": "0.25"}
+        self.collect(FakeBao({("sz.002594", "2025"): [row]}),
+                     codes=("002594",), years=(2024, 2025, 2026))
+        ak = self.root/"ak_partial.csv"
+        pd.DataFrame([{"stock_code": "002594", "ex_date": "2025-07-29",
+                       "share_multiplier": 1.0, "cash_per_old_share": .25}]).to_csv(
+                           ak,index=False)
+        report, _, _, issues, _ = b.audit(self.snap,self.meta,self.rootbatch,akshare_events=ak)
+        self.assertEqual(report["cross_source_fully_observed_matches"],0)
+        self.assertEqual(report["cross_source_partial_amount_fields_unresolved"],1)
+        self.assertEqual(report["cross_source_disagreements_or_missing"],0)
+        self.assertEqual(issues.iloc[0]["result"],
+                         "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED")
+        # If a missing capitalization value could explain a differing
+        # share multiplier, it is NOT proof of a provider contradiction.
+        pd.DataFrame([{"stock_code": "002594", "ex_date": "2025-07-29",
+                       "share_multiplier": 3.0, "cash_per_old_share": .25}]).to_csv(
+                           ak,index=False)
+        report2, _, _, issues2, _ = b.audit(self.snap,self.meta,self.rootbatch,akshare_events=ak)
+        self.assertEqual(report2["cross_source_partial_amount_fields_unresolved"],1)
+        self.assertEqual(issues2.iloc[0]["result"],
+                         "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED")
+        # A disagreement in the *observed* cash amount is a real conflict.
+        pd.DataFrame([{"stock_code": "002594", "ex_date": "2025-07-29",
+                       "share_multiplier": 1.0, "cash_per_old_share": .30}]).to_csv(
+                           ak,index=False)
+        report3, _, _, issues3, _ = b.audit(self.snap,self.meta,self.rootbatch,akshare_events=ak)
+        self.assertEqual(report3["cross_source_disagreements_or_missing"],1)
+        self.assertEqual(issues3.iloc[0]["result"],"BAOSTOCK_AKSHARE_TERMS_CONFLICT")
+
+    def test_partial_fields_do_not_fully_match_issuer_control(self):
+        row = BYD | {"dividStocksPs": "0", "dividReserveToStockPs": "",
+                     "dividCashPsBeforeTax": "0.25"}
+        self.collect(FakeBao({("sz.002594", "2025"): [row]}),
+                     codes=("002594",), years=(2024, 2025, 2026))
+        official=self.root/"issuer_partial.csv"
+        pd.DataFrame([{"stock_code":"002594","ex_date":"2025-07-29",
+                       "share_multiplier":"1.0","cash_per_old_share":"0.25",
+                       "source_id":"ISSUER-SAMPLE"}]).to_csv(official,index=False)
+        report,_,_,_,controls=b.audit(self.snap,self.meta,self.rootbatch,
+                                      issuer_controls=official)
+        self.assertEqual(report["issuer_controls_terms_matched"],0)
+        self.assertEqual(report["issuer_controls_partial_amount_fields"],1)
+        self.assertEqual(controls.iloc[0]["result"],
+                         "PARTIAL_AMOUNTS_MATCH_OBSERVED_TERMS_ONLY")
+        self.assertFalse(report["can_emit_training_labels"])
+
     def test_all_blank_entitlements_are_rejected_not_zero_events(self):
         row = BYD | {"dividStocksPs": "", "dividReserveToStockPs": "", "dividCashPsBeforeTax": ""}
         self.collect(FakeBao({("sz.002594", "2025"): [row]}),
