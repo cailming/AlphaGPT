@@ -13,7 +13,7 @@
 ## 代码
 
 - `ashare/p4_action_feed_baostock.py`：`fetch` + `audit` 两个 CLI。只读冻结股票范围快照和 Ridge 元数据；标准化数据按实施年份查询，按旧测试期边界过滤后**才持久化**。任何请求失败、缺失除权日、接口截断和非沪深映射均记为待核，不会当作无公司行为。
-- `tests/test_p4_action_feed_baostock.py`：14 项不触网单测，覆盖样本缺失、空结果、年限、截断/失败、不含配股数据的隔离声明、股份权益单位、重复除权事件、跨源冲突、比亚迪公告控制、SHA256 防篡改、北京证券交易所代码隔离等边界。
+- `tests/test_p4_action_feed_baostock.py`：15 项不触网单测，覆盖样本缺失、空结果、年限、截断/失败、不含配股数据的隔离声明、股份权益单位、重复除权事件、跨源冲突、比亚迪公告控制、SHA256 防篡改、北京证券交易所代码隔离等边界。
 - 同时保留现有 `ashare/p4_action_feed_free.py` 及用户已经生成的原有 AkShare 抓取批次。**禁止**覆盖它们；新第三源批次在独立根目录存储。
 
 ## Ubuntu 执行：先核查 000004，再检查已知 BYD 事件
@@ -71,6 +71,7 @@ python -u -m ashare.p4_action_feed_baostock audit \
 - `PARTIAL_YEAR_RANGE`：只查询了部分年份。**2000+股票的历史验证不能根据一年空结果断言无分红。**
 - `FETCHED_NOT_VERIFIED`：已经完成此审计区间内所有三个实施年份的请求，但从未认证事件完整。
 - `BAOSTOCK_AKSHARE_MATCH_UNVERIFIED`：候选条款比对一致，**仍非历史完整证明**。
+- `AKSHARE_NOT_COMPARABLE_YET` / `BAOSTOCK_NOT_COMPARABLE_YET`：某一来源尚未完成对应股票的抓取，**不能记作双方条款冲突**。
 - `BAOSTOCK_PARTIAL_AMOUNT_FIELDS_UNVERIFIED`：BaoStock 送/转/派字段部分为空且其余存在正值；按数值零暂供核验对照，禁止直接用作经济收益标签。
 
 所有报告永远输出 `complete_verified_assertions_created=0`、`can_emit_training_labels=false`、`full_historical_action_coverage_certified=false`。年度查询中的“空返回”只表示此接口没有返回信息。异常出现在原数据源、代码版本变化、特殊证券或查询权限时均单独记录而非放行。
