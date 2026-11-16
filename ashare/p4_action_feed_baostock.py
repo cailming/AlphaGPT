@@ -338,6 +338,21 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
     stock["candidate_events"] = stock.stock_code.map(
         candidates.groupby("stock_code").size()).fillna(0).astype(int)
     stock["no_event_rows_observed"] = stock.candidate_events.eq(0)
+    # Source coverage must be known before calling absent events a mismatch.
+    ak_status_by_code = {}
+    if akshare_stock_coverage is not None:
+        other = pd.read_csv(akshare_stock_coverage, dtype="string", encoding="utf-8-sig")
+        if not {"stock_code", "coverage_status"} <= set(other):
+            raise ValueError("AkShare coverage CSV missing required columns")
+        if other.stock_code.duplicated().any():
+            raise ValueError("Duplicate AkShare stock coverage rows")
+        ak_status_by_code = dict(zip(other.stock_code.astype(str),
+                                     other.coverage_status.astype(str)))
+        stock = stock.merge(other[["stock_code", "coverage_status"]].rename(
+            columns={"coverage_status": "akshare_coverage_status"}),
+            on="stock_code", how="left", validate="one_to_one")
+    bao_status_by_code = dict(zip(stock.stock_code.astype(str),
+                                  stock.provider_status.astype(str)))
     mismatches = []
     if akshare_events is not None:
         ak = pd.read_csv(akshare_events, dtype="string", keep_default_na=False, encoding="utf-8-sig")
@@ -347,7 +362,11 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
         for c in candidates.to_dict("records"):
             matched = ak.loc[ak.stock_code.eq(c["stock_code"]) & ak.ex_date.eq(c["ex_date"])]
             if len(matched) == 0:
-                outcome = "BAOSTOCK_ONLY_UNVERIFIED"
+                # AkShare may not have requested BYD at all in first 10 stocks;
+                # that is NOT a disagreement with BaoStock.
+                outcome = ("BAOSTOCK_ONLY_UNVERIFIED" if
+                           ak_status_by_code.get(c["stock_code"]) == "FETCHED_NOT_VERIFIED"
+                           else "AKSHARE_NOT_COMPARABLE_YET")
             elif len(matched) > 1:
                 outcome = "AKSHARE_DUPLICATE_UNRESOLVED"
             elif (np.isclose(float(matched.iloc[0].share_multiplier), c["share_multiplier"], rtol=0, atol=1e-6) and
@@ -357,25 +376,19 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
                 outcome = "BAOSTOCK_AKSHARE_TERMS_CONFLICT"
             mismatches.append({"stock_code": c["stock_code"], "ex_date": c["ex_date"],
                                "result": outcome})
-        # AkShare-only candidates in the sampled stocks are also a gap;
-        # do not silently omit evidence absent from BaoStock.
+        # AkShare-only records are informative only if full BaoStock year
+        # range was successfully queried for the relevant stock.
         for rec in ak.to_dict("records"):
-            if str(rec["stock_code"]) not in set(ledger.stock_code):
+            code = str(rec["stock_code"])
+            if code not in set(ledger.stock_code):
                 continue
-            if not ((candidates.stock_code.eq(rec["stock_code"]) &
+            if not ((candidates.stock_code.eq(code) &
                      candidates.ex_date.eq(rec["ex_date"])).any()):
-                mismatches.append({"stock_code": rec["stock_code"],
-                                   "ex_date": rec["ex_date"],
-                                   "result": "AKSHARE_ONLY_OR_BAOSTOCK_UNAVAILABLE"})
-    # An AkShare stock-level state is an independent audit source, not grounds
-    # for automatic completion even when BaoStock agrees.
-    if akshare_stock_coverage is not None:
-        other = pd.read_csv(akshare_stock_coverage, dtype="string", encoding="utf-8-sig")
-        if not {"stock_code", "coverage_status"} <= set(other):
-            raise ValueError("AkShare coverage CSV missing required columns")
-        stock = stock.merge(other[["stock_code", "coverage_status"]].rename(
-            columns={"coverage_status": "akshare_coverage_status"}),
-            on="stock_code", how="left", validate="one_to_one")
+                outcome = ("AKSHARE_ONLY_UNVERIFIED" if
+                           bao_status_by_code.get(code) == "FETCHED_NOT_VERIFIED"
+                           else "BAOSTOCK_NOT_COMPARABLE_YET")
+                mismatches.append({"stock_code": code,
+                                   "ex_date": rec["ex_date"], "result": outcome})
     compare = pd.DataFrame(mismatches, columns=("stock_code", "ex_date", "result"))
     controls = []
     if issuer_controls is not None:
@@ -420,8 +433,13 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
         "bao_invalid_or_duplicate_rows": len(bad),
         "bao_stock_status_counts": counts,
         "cross_source_comparisons": int(len(compare)),
-        "cross_source_disagreements_or_missing": int(compare.result.ne(
-            "BAOSTOCK_AKSHARE_MATCH_UNVERIFIED").sum()),
+        "cross_source_disagreements_or_missing": int(compare.result.isin([
+            "BAOSTOCK_AKSHARE_TERMS_CONFLICT", "BAOSTOCK_ONLY_UNVERIFIED",
+            "AKSHARE_ONLY_UNVERIFIED", "AKSHARE_DUPLICATE_UNRESOLVED"
+        ]).sum()),
+        "cross_source_not_comparable_yet": int(compare.result.isin([
+            "AKSHARE_NOT_COMPARABLE_YET", "BAOSTOCK_NOT_COMPARABLE_YET"
+        ]).sum()),
         "issuer_controls_count": len(control_df),
         "issuer_controls_terms_matched": int(control_df.result.eq(
             "TERMS_MATCH_ISSUER_SAMPLE_UNVERIFIED_COVERAGE").sum()),
