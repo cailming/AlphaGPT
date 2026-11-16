@@ -315,6 +315,14 @@ Ubuntu 真实运行：`test_p4_action_feed_free.py` 旧版 7/7 通过；正式�
 
 旧 `snapshot` / `batch_000000` / `audit_first_batch` 都不可覆盖。先读取 `batches/batch_000000/request_ledger.csv` 确认错误原因，再用 `batch_root=batches_retry_20261116` 的新路径重抓 10 只，并输出到 `audit_retry_20261116`。重测方法与完整命令见 [P4.3-E2 免费接入说明](ashare/P4_3_E2_FREE_FEED.md)。**未产生 `COMPLETE_VERIFIED` 或任何可训练经济收益标签，模型训练闸门继续关闭**。
 
+### P4.3-E2 第三次真实网络诊断：29/30，巨潮单股 KeyError（2026-11-16）
+
+Ubuntu `ashare-dev@7dac7c8` 在 AkShare 1.20.65 下已通过 **11 项**免费源单元测试，并且明确从本仓库加载到修正后的巨潮接口名（`stock_dividend_cninfo`）。头 10 只股票第二轮网络数据抓取成功 **29/30**：新浪分红 10/10、配股 10/10，巨潮分红 9/10，最后一次返回 `KeyError: '实施方案公告日期'`；股票级 `9 FETCHED_NOT_VERIFIED`、`1 FETCH_FAILED_OR_TRUNCATED`、`5439 NOT_FETCHED`。原有分红候选 4 条、无效/冲突行 5 条、配股 20 条为全历史而指定审计期间 0 条；`issuer_controls_not_fetched=1`（前 10 只未请求比亚迪）而 `mismatch=0`，属于合理口径。仍没有任何完整覆盖证明或可训练标签。
+
+[AkShare 的实现](https://github.com/akfamily/akshare/blob/main/akshare/stock/issue/stock_dividend_cninfo.py) 对 CNINFO 返回的 `records` 构造 DataFrame 后直接访问公告日期列，**当上游返回空数组或字段名称变化时都可能抛 KeyError，无法仅据错误归因为“无分红”**。本次在 `ashare/p4_action_feed_free.py` 新增专门的 `UPSTREAM_EMPTY_OR_SCHEMA` 非成功状态，审计结果记录 `cninfo_upstream_ambiguous_calls` 和 `endpoint_failure_stocks`。维持模型训练质量闸门；不要因剩余一只股票而放行数据或影响 `stock_scripts` 的生产行情采集。新增两项合成回归测试，现共 **13 项**，须 Ubuntu 重测。
+
+诊断及新目录重试命令见 [P4.3-E2 免费方案说明](ashare/P4_3_E2_FREE_FEED.md)；旧数据仍保留且不应覆盖。**当前修改尚未在用户 Ubuntu 或真实巨潮接口重新执行。**
+
 ### P4 当前已实现的研究契约
 
 当前 `970151c` 提交已经包含 P4 MVP，而非需要从零开发：
