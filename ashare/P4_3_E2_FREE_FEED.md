@@ -77,9 +77,9 @@ python -u -m ashare.p4_action_feed_free audit \
 
 用户的首批快照包含 **5,449 只在正式行情数据库中出现过的股票**，10 只测试股票共发起 30 次免费接口调用，其中 20 次成功、10 次失败或截断。因为每只股票必须同时通过新浪分红、巨潮分红和新浪配股三个子接口，十只股票全部为 `FETCH_FAILED_OR_TRUNCATED`；`5439 NOT_FETCHED` 是未轮询的剩余股票，`0 FETCHED_NOT_VERIFIED` 并不代表所有信息源完全无数据。
 
-已从 GitHub 源码发现**一处实际兼容性错误**：巨潮方法错误调用了旧拼写 `stock_dividents_cninfo`。现在优先用当前 `stock_dividend_cninfo`，再兼容旧拼写，并新增对应回归测试。注意：只有读取旧批次的 `request_ledger.csv` 才能确认其十次失败是否全部来自巨潮，不能只由聚合数字反推错误原因。
+已从 GitHub 源码发现**一处实际兼容性错误**：巨潮方法错误调用了旧拼写 `stock_dividents_cninfo`。现在优先用当前 `stock_dividend_cninfo`，再兼容旧拼写，并新增对应回归测试。另对配股历史只统计本审计区间内除权日，原始历史条数另列 `rights_records_raw_all_history`；目前共有 **11 项**本地回归测试通过，尚待 Ubuntu 复测。注意：只有读取旧批次的 `request_ledger.csv` 才能确认其十次失败是否全部来自巨潮，不能只由聚合数字反推错误原因。
 
-原审计还错误地将“比亚迪尚未包含在前十只股票”计入已知公告匹配失败。现在将 `NOT_FETCHED_FOR_CONTROL`、`INCOMPLETE_FETCH_FOR_CONTROL` 与真正 `MISSING_OR_CONFLICTING` 分开；`issuer_controls_mismatch` 只统计已完整抓取后仍不匹配的控制事件，另外新增未抓和未完整抓取计数。新批次和新审计都会输出 `endpoint_results`，给出各子接口的成功/API 错误/返回上限数量；未修改旧批次，也不自动签发完整覆盖证明。
+原审计还错误地将“比亚迪尚未包含在前十只股票”计入已知公告匹配失败。现在将 `NOT_FETCHED_FOR_CONTROL`、`INCOMPLETE_FETCH_FOR_CONTROL` 与真正 `MISSING_OR_CONFLICTING` 分开；`issuer_controls_mismatch` 只统计已完整抓取后仍不匹配的控制事件，另外新增未抓和未完整抓取计数。**新版审计的 `feed_coverage_audit.json`** 会输出 `endpoint_results` 和 `endpoint_failure_examples`，分解各子接口的成功/API 错误/返回上限数量；原始 `batch.json` 保留聚合计数，逐请求详情以 `request_ledger.csv` 为准；未修改旧批次，也不自动签发完整覆盖证明。
 
 ### 保留旧快照，使用全新路径重测
 
@@ -115,4 +115,4 @@ python -u -m ashare.p4_action_feed_free audit \
   --out "$ROOT/audit_retry_20261116"
 ```
 
-只有当新 `batch.json` 的 `endpoint_results` 显示三个数据源都成功，相关股票的 `coverage_by_stock.csv` 才从 `FETCH_FAILED_OR_TRUNCATED` 转为 `FETCHED_NOT_VERIFIED`；**即使三源均成功，也不会成为 `COMPLETE_VERIFIED`**。配股历史的行数不是已确认配股事件数量；原有 4 条 `audit_issues` 必须看具体 `reason` 再判定是源字段无效还是跨源矛盾。不要直接对 5,449 只股票发起 16,347 次请求，先确认免费接口稳定性和服务条款。
+只有当新 `audit_retry_20261116/feed_coverage_audit.json` 的 `endpoint_results` 显示三个数据源都成功，相关股票的 `coverage_by_stock.csv` 才从 `FETCH_FAILED_OR_TRUNCATED` 转为 `FETCHED_NOT_VERIFIED`；**即使三源均成功，也不会成为 `COMPLETE_VERIFIED`**。配股历史的行数不是已确认配股事件数量；原有 4 条 `audit_issues` 必须看具体 `reason` 再判定是源字段无效还是跨源矛盾。不要直接对 5,449 只股票发起 16,347 次请求，先确认免费接口稳定性和服务条款。
