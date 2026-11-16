@@ -230,6 +230,20 @@ class BaoTests(unittest.TestCase):
             "TERMS_MATCH_ISSUER_SAMPLE_UNVERIFIED_COVERAGE")
         self.assertFalse(summary["full_historical_action_coverage_certified"])
 
+    def test_unfetched_akshare_control_not_a_false_disagreement(self):
+        self.collect(FakeBao({("sz.002594", "2025"): [BYD]}),
+                     codes=("002594",), years=(2024,2025,2026))
+        ak = self.root/"ak.csv"
+        pd.DataFrame(columns=["stock_code", "ex_date", "share_multiplier",
+                              "cash_per_old_share"]).to_csv(ak,index=False)
+        cov=self.root/"coverage.csv"
+        pd.DataFrame([{"stock_code":"002594", "coverage_status":"NOT_FETCHED"}]).to_csv(cov,index=False)
+        report, _, _, issues, _ = b.audit(self.snap,self.meta,self.rootbatch,
+                                          akshare_events=ak, akshare_stock_coverage=cov)
+        self.assertEqual(report["cross_source_disagreements_or_missing"],0)
+        self.assertEqual(report["cross_source_not_comparable_yet"],1)
+        self.assertTrue(issues.result.eq("AKSHARE_NOT_COMPARABLE_YET").all())
+
     def test_future_proposal_not_saved(self):
         row = BYD | {"dividPlanDate": "2026-07-01"}
         self.collect(FakeBao({("sz.002594", "2025"): [row]}),
