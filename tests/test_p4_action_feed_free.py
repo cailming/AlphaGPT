@@ -47,6 +47,19 @@ class FakeAk:
         return pd.DataFrame([x])
 
 
+class ModernAk(FakeAk):
+    """Current AkShare spelling; legacy method must never be selected."""
+    def stock_dividend_cninfo(self, symbol):
+        return FakeAk.stock_dividents_cninfo(self, symbol)
+    def stock_dividents_cninfo(self, symbol):
+        raise AssertionError("Legacy misspelled CNINFO method was selected")
+
+
+class PartialModernAk(ModernAk):
+    def stock_dividend_cninfo(self, symbol):
+        raise ConnectionError("simulated CNINFO request failure")
+
+
 class FreeFeedTests(unittest.TestCase):
     def setUp(self):
         self.tmp=TemporaryDirectory()
@@ -85,6 +98,53 @@ class FreeFeedTests(unittest.TestCase):
         self.assertTrue(stocks.complete_verified.eq(False).all())
         self.assertEqual(report["fetched_not_verified"],2)
         self.assertEqual(len(issues),0)
+
+    def test_current_cninfo_method_name_selected_and_legacy_fallback_supported(self):
+        endpoint = free._endpoint(ModernAk(), "002594", "cninfo_dividend")
+        self.assertEqual(len(endpoint), 1)
+        self.assertEqual(endpoint.iloc[0]["除权日"], "2025-07-29")
+        old_endpoint = free._endpoint(FakeAk(), "002594", "cninfo_dividend")
+        self.assertEqual(len(old_endpoint), 1)
+        self.batch(ak=ModernAk())
+        report, events, stocks, _, _, _ = free.audit_batches(
+            self.snap, self.batchroot
+        )
+        self.assertEqual(report["failed_or_truncated"], 0)
+        self.assertEqual(report["fetched_not_verified"], 2)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events.iloc[0].review_status,
+                         "TWO_PUBLIC_SOURCES_MATCH_UNVERIFIED")
+
+    def test_official_control_not_fetched_is_not_false_mismatch(self):
+        free.fetch_batch(self.snap, ak=ModernAk(), offset=0, limit=1,
+                         out=self.batchroot/"batch_000000", wait_seconds=0)
+        official=self.root/"official.csv"
+        official.write_text(
+            "stock_code,ex_date,share_multiplier,cash_per_old_share,source_id\n"
+            "002594,2025-07-29,3,3.974,BYD-2025-047\n"
+        )
+        report, _, stocks, _, _, controls = free.audit_batches(
+            self.snap, self.batchroot, official_events=official
+        )
+        self.assertEqual(controls.iloc[0].status, "NOT_FETCHED_FOR_CONTROL")
+        self.assertEqual(report["issuer_controls_not_fetched"], 1)
+        self.assertEqual(report["issuer_controls_mismatch"], 0)
+        self.assertEqual(report["issuer_controls_matched"], 0)
+        self.assertEqual(report["issuer_controls_incomplete_fetch"], 0)
+
+    def test_failed_control_source_not_misreported_as_data_conflict(self):
+        self.batch(ak=PartialModernAk())
+        official=self.root/"official.csv"
+        official.write_text(
+            "stock_code,ex_date,share_multiplier,cash_per_old_share,source_id\n"
+            "002594,2025-07-29,3,3.974,BYD-2025-047\n"
+        )
+        report, _, _, _, _, controls = free.audit_batches(
+            self.snap, self.batchroot, official_events=official
+        )
+        self.assertEqual(controls.iloc[0].status, "INCOMPLETE_FETCH_FOR_CONTROL")
+        self.assertEqual(report["issuer_controls_incomplete_fetch"], 1)
+        self.assertEqual(report["issuer_controls_mismatch"], 0)
 
     def test_conflicting_sources_quarantine_event(self):
         self.batch(ak=FakeAk(conflict=True))
