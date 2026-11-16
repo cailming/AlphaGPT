@@ -173,6 +173,52 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(len(rights),1)
         self.assertEqual(rights.iloc[0]["除权日"],"2025-02-05")
 
+    def test_cninfo_keyerror_is_ambiguous_not_proof_of_empty_actions(self):
+        class EmptyOrSchemaAk(FakeAk):
+            def stock_dividend_cninfo(self, symbol):
+                if symbol == "002594":
+                    raise KeyError("实施方案公告日期")
+                return FakeAk.stock_dividents_cninfo(self, symbol)
+
+        self.batch(ak=EmptyOrSchemaAk())
+        ledger = free._read(self.batchroot/"batch_000000"/"request_ledger.csv")
+        bad = ledger.loc[(ledger.stock_code.eq("002594")) &
+                         (ledger.endpoint.eq("cninfo_dividend"))].iloc[0]
+        self.assertEqual(bad.status, "UPSTREAM_EMPTY_OR_SCHEMA")
+        self.assertIn("not a verified empty", bad.error)
+        report, events, stocks, _, _, _ = free.audit_batches(
+            self.snap, self.batchroot
+        )
+        self.assertEqual(report["cninfo_upstream_ambiguous_calls"], 1)
+        self.assertEqual(report["failed_or_truncated"], 1)
+        self.assertEqual(report["fetched_not_verified"], 1)
+        self.assertEqual(report["endpoint_status_counts"]["cninfo_dividend"][
+            "UPSTREAM_EMPTY_OR_SCHEMA"], 1)
+        self.assertEqual(report["endpoint_failure_stocks"]["cninfo_dividend"][0][
+            "stock_code"], "002594")
+        self.assertEqual(stocks.loc[stocks.stock_code.eq("002594"),
+                                    "coverage_status"].iloc[0],
+                         "FETCH_FAILED_OR_TRUNCATED")
+        self.assertFalse(stocks.complete_verified.any())
+        self.assertTrue(report["training_gate_must_remain_closed"])
+        # Other independent provider observations remain only candidates.
+        self.assertTrue(events.review_status.str.contains("UNVERIFIED").all())
+
+    def test_other_cninfo_keyerror_remains_api_error(self):
+        class BrokenAk(FakeAk):
+            def stock_dividend_cninfo(self, symbol):
+                if symbol == "002594":
+                    raise KeyError("unexpected field")
+                return FakeAk.stock_dividents_cninfo(self, symbol)
+
+        self.batch(ak=BrokenAk())
+        ledger=free._read(self.batchroot/"batch_000000"/"request_ledger.csv")
+        issue=ledger.loc[(ledger.stock_code.eq("002594")) &
+                         (ledger.endpoint.eq("cninfo_dividend"))].iloc[0]
+        self.assertEqual(issue.status, "API_ERROR")
+        report,_,_,_,_,_=free.audit_batches(self.snap,self.batchroot)
+        self.assertEqual(report["cninfo_upstream_ambiguous_calls"],0)
+
     def test_tampered_raw_files_fail_sha256_audit(self):
         path=self.batch()
         raw=path/"raw_sina_dividend.csv"
