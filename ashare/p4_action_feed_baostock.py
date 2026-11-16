@@ -369,11 +369,26 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
                            else "AKSHARE_NOT_COMPARABLE_YET")
             elif len(matched) > 1:
                 outcome = "AKSHARE_DUPLICATE_UNRESOLVED"
-            elif (np.isclose(float(matched.iloc[0].share_multiplier), c["share_multiplier"], rtol=0, atol=1e-6) and
-                  np.isclose(float(matched.iloc[0].cash_per_old_share), c["cash_per_old_share"], rtol=0, atol=1e-6)):
-                outcome = "BAOSTOCK_AKSHARE_MATCH_UNVERIFIED"
             else:
-                outcome = "BAOSTOCK_AKSHARE_TERMS_CONFLICT"
+                # BaoStock legitimately leaves some per-share action fields
+                # blank. Normalization keeps a provisional zero for arithmetic,
+                # but that zero must NOT become independent evidence of "no
+                # bonus / no capitalization". Check only the observed terms.
+                observed = set(str(c["blank_amount_fields"]).split("|")) - {""}
+                share_equal = np.isclose(
+                    float(matched.iloc[0].share_multiplier),
+                    float(c["share_multiplier"]), rtol=0, atol=1e-6)
+                cash_equal = np.isclose(
+                    float(matched.iloc[0].cash_per_old_share),
+                    float(c["cash_per_old_share"]), rtol=0, atol=1e-6)
+                share_complete = not ({"dividStocksPs", "dividReserveToStockPs"} & observed)
+                cash_complete = "dividCashPsBeforeTax" not in observed
+                if (share_complete and not share_equal) or (cash_complete and not cash_equal):
+                    outcome = "BAOSTOCK_AKSHARE_TERMS_CONFLICT"
+                elif observed:
+                    outcome = "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED"
+                else:
+                    outcome = "BAOSTOCK_AKSHARE_MATCH_UNVERIFIED"
             mismatches.append({"stock_code": c["stock_code"], "ex_date": c["ex_date"],
                                "result": outcome})
         # AkShare-only records are informative only if full BaoStock year
@@ -416,8 +431,13 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
                                atol=1e-6, rtol=0) and
                     np.isclose(float(found.iloc[0].cash_per_old_share), float(row["cash_per_old_share"]),
                                atol=1e-6, rtol=0))
-                disposition = ("TERMS_MATCH_ISSUER_SAMPLE_UNVERIFIED_COVERAGE" if matched
-                               else "MISSING_OR_CONFLICTING_BAOSTOCK_CANDIDATE")
+                if matched and str(found.iloc[0]["blank_amount_fields"]):
+                    # Matching a source using placeholder zeros is NOT an
+                    # independent issuer control on missing BaoStock fields.
+                    disposition = "PARTIAL_AMOUNTS_MATCH_OBSERVED_TERMS_ONLY"
+                else:
+                    disposition = ("TERMS_MATCH_ISSUER_SAMPLE_UNVERIFIED_COVERAGE" if matched
+                                   else "MISSING_OR_CONFLICTING_BAOSTOCK_CANDIDATE")
             controls.append({"stock_code": code, "ex_date": str(ex.date()),
                              "source_id": row["source_id"], "result": disposition})
     control_df = pd.DataFrame(controls, columns=("stock_code", "ex_date", "source_id", "result"))
@@ -433,6 +453,10 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
         "bao_invalid_or_duplicate_rows": len(bad),
         "bao_stock_status_counts": counts,
         "cross_source_comparisons": int(len(compare)),
+        "cross_source_fully_observed_matches": int(compare.result.eq(
+            "BAOSTOCK_AKSHARE_MATCH_UNVERIFIED").sum()),
+        "cross_source_partial_amount_fields_unresolved": int(compare.result.eq(
+            "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED").sum()),
         "cross_source_disagreements_or_missing": int(compare.result.isin([
             "BAOSTOCK_AKSHARE_TERMS_CONFLICT", "BAOSTOCK_ONLY_UNVERIFIED",
             "AKSHARE_ONLY_UNVERIFIED", "AKSHARE_DUPLICATE_UNRESOLVED"
@@ -443,6 +467,8 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
         "issuer_controls_count": len(control_df),
         "issuer_controls_terms_matched": int(control_df.result.eq(
             "TERMS_MATCH_ISSUER_SAMPLE_UNVERIFIED_COVERAGE").sum()),
+        "issuer_controls_partial_amount_fields": int(control_df.result.eq(
+            "PARTIAL_AMOUNTS_MATCH_OBSERVED_TERMS_ONLY").sum()),
         "issuer_controls_missing_or_conflicting": int(control_df.result.eq(
             "MISSING_OR_CONFLICTING_BAOSTOCK_CANDIDATE").sum()),
         "complete_verified_assertions_created": 0,
