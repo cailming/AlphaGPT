@@ -64,10 +64,55 @@ python -u -m ashare.p4_action_feed_free audit \
 - `UNVERIFIED_corporate_actions_candidates.csv`：按每十股折算为每旧股的分红送转候选，记录单源/双源对账情况，不可直接作为已验证训练标签。
 - `audit_issues.csv`：源数据字段缺失、同日多项矛盾、不同源送转和税前现金冲突。
 - `rights_issues_for_review.csv`：配股仍需处理认购比例、缴款和股份到账等复杂影响。
-- `issuer_control_reconciliation.csv`：若试点批次未覆盖 `002594`，已知比亚迪控制事件仍显示 `MISSING_OR_CONFLICTING`，**这是未抓到该股票导致的预期缺口，不意味着已查到错误**。后续扩展覆盖后再核对。
+- `issuer_control_reconciliation.csv`：区分 `NOT_FETCHED_FOR_CONTROL`（样本未请求）、`INCOMPLETE_FETCH_FOR_CONTROL`（该股有子接口失败）、`MATCHED_ISSUER_CONTROL`（已核公告与候选条款匹配）和 `MISSING_OR_CONFLICTING`（该股接口完整返回、但未找到一致条款）。没有抓到比亚迪不应误算为公告冲突。
 
 ## 安全与最终门槛
 
 这只是**免费数据候选流水线**，不是已验证权益事件数据库。不得自动生成覆盖证明、自动解锁 `ashare.p4_corporate_actions` 的训练闸门，不得用旧已查看测试期挑选信号。未取得完整历史公司行为来源、历史复权特征和公司公告核验前，Transformer / 新 Ridge 训练继续暂停。
 
 免费备选：BaoStock `query_dividend_data(code, year, yearType="operate")` 也可免费获取每股分红、送转、除权日，适合后续第三源交叉验证；但在引入其历史可靠性与时点审计前也不能自动签发完整覆盖。
+
+
+## 2026-11-16：首批真实运行诊断及兼容修复
+
+用户的首批快照包含 **5,449 只在正式行情数据库中出现过的股票**，10 只测试股票共发起 30 次免费接口调用，其中 20 次成功、10 次失败或截断。因为每只股票必须同时通过新浪分红、巨潮分红和新浪配股三个子接口，十只股票全部为 `FETCH_FAILED_OR_TRUNCATED`；`5439 NOT_FETCHED` 是未轮询的剩余股票，`0 FETCHED_NOT_VERIFIED` 并不代表所有信息源完全无数据。
+
+已从 GitHub 源码发现**一处实际兼容性错误**：巨潮方法错误调用了旧拼写 `stock_dividents_cninfo`。现在优先用当前 `stock_dividend_cninfo`，再兼容旧拼写，并新增对应回归测试。注意：只有读取旧批次的 `request_ledger.csv` 才能确认其十次失败是否全部来自巨潮，不能只由聚合数字反推错误原因。
+
+原审计还错误地将“比亚迪尚未包含在前十只股票”计入已知公告匹配失败。现在将 `NOT_FETCHED_FOR_CONTROL`、`INCOMPLETE_FETCH_FOR_CONTROL` 与真正 `MISSING_OR_CONFLICTING` 分开；`issuer_controls_mismatch` 只统计已完整抓取后仍不匹配的控制事件，另外新增未抓和未完整抓取计数。新批次和新审计都会输出 `endpoint_results`，给出各子接口的成功/API 错误/返回上限数量；未修改旧批次，也不自动签发完整覆盖证明。
+
+### 保留旧快照，使用全新路径重测
+
+```bash
+cd ~/gcdev/alphagpt/AlphaGPT
+conda activate py312
+git switch ashare-dev
+git pull --ff-only origin ashare-dev
+python -m unittest discover -s tests -p 'test_p4_action_feed_free.py' -v
+
+META=reports/ashare_p4_mvp/2025-03-01_2026-09-30/model_metadata.json
+ROOT=reports/ashare_p4_action_feed_free
+SNAP=$ROOT/snapshot_2024-12-01_2026-06-11
+
+# 先查看旧批次哪一种子接口实际失败
+python - <<'PY'
+import pandas as pd
+p = "reports/ashare_p4_action_feed_free/batches/batch_000000/request_ledger.csv"
+df = pd.read_csv(p)
+print(pd.crosstab(df["endpoint"], df["status"]))
+print(df.loc[df.status.ne("SUCCESS"), ["stock_code", "endpoint", "status", "error"]].to_string(index=False))
+PY
+
+# 不重建 snapshot，不覆盖原始批次，用新批次根目录重测
+python -u -m ashare.p4_action_feed_free fetch \
+  --reference-metadata "$META" --snapshot "$SNAP" \
+  --offset 0 --limit 10 --wait-seconds 1.5 \
+  --out "$ROOT/batches_retry_20261116/batch_000000"
+
+python -u -m ashare.p4_action_feed_free audit \
+  --reference-metadata "$META" --snapshot "$SNAP" \
+  --batch-root "$ROOT/batches_retry_20261116" \
+  --out "$ROOT/audit_retry_20261116"
+```
+
+只有当新 `batch.json` 的 `endpoint_results` 显示三个数据源都成功，相关股票的 `coverage_by_stock.csv` 才从 `FETCH_FAILED_OR_TRUNCATED` 转为 `FETCHED_NOT_VERIFIED`；**即使三源均成功，也不会成为 `COMPLETE_VERIFIED`**。配股历史的行数不是已确认配股事件数量；原有 4 条 `audit_issues` 必须看具体 `reason` 再判定是源字段无效还是跨源矛盾。不要直接对 5,449 只股票发起 16,347 次请求，先确认免费接口稳定性和服务条款。
