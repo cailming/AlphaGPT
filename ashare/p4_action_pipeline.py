@@ -36,6 +36,8 @@ SOURCES = {**{endpoint: "sina" if endpoint.startswith("sina") else "cninfo"
 RETRYABLE = {"CONNECTION_ERROR", "TIMEOUT", "RATE_LIMIT", "API_ERROR",
              "UPSTREAM_EMPTY_OR_SCHEMA"}
 CIRCUIT_ERRORS = RETRYABLE | {"SCHEMA_CHANGE", "ROW_LIMIT"}
+DATE_DIAGNOSTICS = ("missing_ex_date_rows", "invalid_ex_date_rows", "missing_announcement_date_rows",
+                    "invalid_announcement_date_rows", "wrong_query_year_rows")
 AK_COLUMNS = ["stock_code", "endpoint", "status", "response_rows",
               "dropped_future_or_invalid", "error"]
 BAO_COLUMNS = ["stock_code", "bs_code", "year", "status", "response_rows",
@@ -389,7 +391,11 @@ def disposition(evidence, tasks):
                      "state": evidence.state(task), "result": attempt.category if attempt else "",
                      "evidence": str(attempt.evidence) if attempt else "",
                      "attempts": len(history), "new_attempts": evidence.new_count(task),
-                     "response_rows": int(attempt.entry["response_rows"] or 0) if attempt else 0})
+                     "response_rows": int(attempt.entry["response_rows"] or 0) if attempt else 0,
+                     "legacy_unclassified_date_error": bool(attempt and attempt.category == "UNKNOWN_EX_DATE"
+                                                            and "missing_ex_date_rows" not in attempt.entry),
+                     **{field: attempt.entry.get(field) if attempt else None
+                        for field in DATE_DIAGNOSTICS}})
     return pd.DataFrame(rows)
 
 
@@ -428,7 +434,7 @@ def tables(evidence, codes, tasks):
                 "evidence": row["evidence"], "retry_count": max(row["attempts"] - 1, 0),
                 "state": row["state"], "automatic": pending,
                 "action": "Retry this provider request" if pending else "Review upstream evidence",
-                "priority": "P1" if row["result"] == "UNKNOWN_EX_DATE" else "P2",
+                "priority": {"WRONG_STOCK_CODE": "P0", "UNKNOWN_EX_DATE": "P1"}.get(row["result"], "P2"),
             })
         entry = result.entry | {"status": result.category}
         if task.endpoint == BAO:
@@ -578,6 +584,7 @@ def write_report(evidence, codes, checkpoint):
         "p0_exceptions": p0, "old_test_isolation_passed": True, "circuit": circuit,
         "scope_ready_for_review": bool(complete_requests + terminal == offered and not p0 and not circuit),
         "complete_verified_assertions_created": 0, "can_emit_training_labels": False,
+        "training_gate": "CLOSED",
         "full_historical_action_coverage_certified": False,
         "issuer_control_results": {str(k): int(v) for k, v in controls.result.value_counts().items()},
     }
@@ -610,7 +617,7 @@ def track_attempt(checkpoint, args, attempt):
     window.append([key, attempt.category])
     del window[:-args.circuit_window]
     failed = sum(status in CIRCUIT_ERRORS for _, status in window)
-    if (attempt.category in {"RATE_LIMIT", "SCHEMA_CHANGE"}
+    if (attempt.category in {"RATE_LIMIT", "SCHEMA_CHANGE", "WRONG_STOCK_CODE"}
             or (len(window) == args.circuit_window and failed / len(window) >= args.error_rate)):
         checkpoint["circuit"] = {"source": source, "reason": attempt.category, "failed": failed,
                                  "observed": len(window), "last_task": key}

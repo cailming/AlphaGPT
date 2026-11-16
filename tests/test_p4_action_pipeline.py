@@ -254,3 +254,34 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(summary["terminal_exceptions"], 1)
         self.assertEqual(summary["unique_candidate_events"], 1)
+
+    def test_ak_date_diagnostics_exclude_known_out_of_period_rows(self):
+        def record(ex, announced):
+            return dict(zip(p.free.CNINFO_COLS,
+                            [announced, 0, 0, .5, ex, "2025-05-01"], strict=True))
+
+        class Ak:
+            def stock_dividend_cninfo(self, symbol):
+                return pd.DataFrame([record("", "2025-05-01"), record("bad", "2025-05-01"),
+                                     record("2025-05-03", ""), record("1993-05-17", ""),
+                                     record("", "2026-06-30"), record("2025-05-06", "2025-05-01")])
+
+        entry, raw = p.free.fetch_request(Ak(), "000001", "cninfo_dividend",
+                                          cutoff=p.CUTOFF, row_cap=1000, audit_start="2024-12-01")
+        self.assertEqual(entry["status"], "UNKNOWN_EX_DATE")
+        self.assertEqual(entry["missing_ex_date_rows"], 1)
+        self.assertEqual(entry["invalid_ex_date_rows"], 1)
+        self.assertEqual(entry["missing_announcement_date_rows"], 1)
+        self.assertEqual(raw["除权日"].tolist(), ["2025-05-06"])
+
+    def test_wrong_returned_security_opens_p0_circuit(self):
+        def provider(task):
+            if task.endpoint == p.BAO:
+                return {"status": "WRONG_STOCK_CODE"}, []
+            return self.success(task)
+
+        summary, code = self.first_run(provider, limit="1")
+        self.assertEqual(code, 2)
+        self.assertEqual(summary["p0_exceptions"], 1)
+        self.assertEqual(summary["circuit"]["reason"], "WRONG_STOCK_CODE")
+        self.assertEqual(summary["training_gate"], "CLOSED")

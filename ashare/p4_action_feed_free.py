@@ -165,10 +165,21 @@ def _prune(table: pd.DataFrame, endpoint: str, cutoff: str) -> tuple[pd.DataFram
     return d.loc[keep].copy(), len(d) - sum(keep)
 
 
+def _diagnostic_day(value):
+    if pd.isna(value) or str(value).strip().lower() in ("", "none", "nan", "nat", "--"):
+        return None, "missing"
+    try:
+        return valid_day(value), ""
+    except (TypeError, ValueError):
+        return None, "invalid"
+
+
 def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
                   audit_start: str | None = None) -> tuple[dict, pd.DataFrame]:
     kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
     status, error, rows, dropped = "SUCCESS", "", 0, 0
+    diagnostics = {f"{problem}_{date}_date_rows": 0
+                   for problem in ("missing", "invalid") for date in ("ex", "announcement")}
     try:
         frame = _endpoint(ak, code, endpoint)
         if not isinstance(frame, pd.DataFrame):
@@ -184,20 +195,24 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
             kept.insert(0, "request_code", code)
             if audit_start is not None and dropped:
                 exfield, annfield = _DATE_FIELDS[endpoint]
+                start, end = valid_day(audit_start), valid_day(cutoff)
                 relevant = frame
                 if endpoint == "sina_dividend":
                     relevant = frame.loc[frame["进度"].eq("实施")]
                 for row in relevant.to_dict("records"):
-                    try:
-                        ex = valid_day(row[exfield])
-                        if valid_day(audit_start) <= ex < valid_day(cutoff):
-                            valid_day(row[annfield])
-                    except (ValueError, TypeError):
-                        # Preserve valid rows independently of the incomplete
-                        # request coverage disposition.
-                        status = "UNKNOWN_EX_DATE"
-                        error = "Provider rows have unknown ex or announcement dates"
-                        break
+                    ex, ex_problem = _diagnostic_day(row[exfield])
+                    if ex is not None and not start <= ex < end:
+                        continue
+                    announced, announcement_problem = _diagnostic_day(row[annfield])
+                    if announced is not None and announced >= end:
+                        continue
+                    if ex_problem:
+                        diagnostics[ex_problem + "_ex_date_rows"] += 1
+                    if announcement_problem:
+                        diagnostics[announcement_problem + "_announcement_date_rows"] += 1
+                if any(diagnostics.values()):
+                    status = "UNKNOWN_EX_DATE"
+                    error = "Provider rows have unknown ex or announcement dates"
     except Exception as exc:
         if (endpoint == "cninfo_dividend" and isinstance(exc, KeyError)
                 and "实施方案公告日期" in str(exc)):
@@ -209,8 +224,11 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
             status = "API_ERROR"
             error = f"{type(exc).__name__}: {str(exc)[:200]}"
             kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
-    return {"stock_code": code, "endpoint": endpoint, "status": status,
-            "response_rows": rows, "dropped_future_or_invalid": dropped, "error": error}, kept
+    entry = {"stock_code": code, "endpoint": endpoint, "status": status,
+             "response_rows": rows, "dropped_future_or_invalid": dropped, "error": error}
+    if audit_start is not None and status in {"SUCCESS", "UNKNOWN_EX_DATE"}:
+        entry.update(diagnostics)
+    return entry, kept
 
 
 def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,

@@ -120,11 +120,18 @@ def _response_rows(result, *, cap: int) -> tuple[list[dict], int]:
     return records, len(records)
 
 
+def _date_problem(value):
+    return "missing" if str(value).strip().lower() in ("", "none", "nan", "nat", "--") else "invalid"
+
+
 def fetch_query(bs, code: str, year: int, *, begin, cut, cap: int
                 ) -> tuple[dict, list[dict]]:
     bs_code = _provider_code(code)
     status, error, row_count, excluded, invalid = "SUCCESS", "", 0, 0, 0
     raw_rows = []
+    diagnostics = {"missing_ex_date_rows": 0, "invalid_ex_date_rows": 0,
+                   "missing_announcement_date_rows": 0, "invalid_announcement_date_rows": 0,
+                   "wrong_query_year_rows": 0}
     if bs_code is None:
         status, error = "UNSUPPORTED_EXCHANGE", "No verified SH/SZ BaoStock code mapping"
     else:
@@ -133,9 +140,20 @@ def fetch_query(bs, code: str, year: int, *, begin, cut, cap: int
             retrieved, row_count = _response_rows(rs, cap=cap)
             for item in retrieved:
                 if item["code"] != bs_code:
-                    raise ValueError("Provider returned incorrect security code")
+                    status, error = "WRONG_STOCK_CODE", "Provider returned incorrect security code"
+                    raw_rows = []
+                    break
+                plan = _nullable_day(item["dividPlanDate"])
+                if pd.notna(plan) and plan >= cut:
+                    excluded += 1
+                    continue
                 ex = _nullable_day(item["dividOperateDate"])
-                if pd.isna(ex) or ex.year != year:
+                if pd.isna(ex):
+                    diagnostics[_date_problem(item["dividOperateDate"]) + "_ex_date_rows"] += 1
+                    invalid += 1
+                    continue
+                if ex.year != year:
+                    diagnostics["wrong_query_year_rows"] += 1
                     invalid += 1
                     continue
                 if ex < begin or ex >= cut:
@@ -144,9 +162,11 @@ def fetch_query(bs, code: str, year: int, *, begin, cut, cap: int
                 if any(_nullable_day(item[col]) >= cut for col in ("dividPlanDate", "dividRegistDate")):
                     excluded += 1
                     continue
+                if pd.isna(plan):
+                    diagnostics[_date_problem(item["dividPlanDate"]) + "_announcement_date_rows"] += 1
                 raw_rows.append({"request_code": code, "query_year": year,
                                  **{k: str(item[k]) for k in RAW_FIELDS}})
-            if invalid:
+            if invalid and status == "SUCCESS":
                 status = "UNKNOWN_EX_DATE"
                 error = f"{invalid} provider rows lack valid ex-date and were NOT saved"
         except OverflowError as exc:
@@ -158,7 +178,8 @@ def fetch_query(bs, code: str, year: int, *, begin, cut, cap: int
     return {"stock_code": code, "bs_code": bs_code or "", "year": year, "status": status,
             "response_rows": row_count, "saved_rows": len(raw_rows),
             "excluded_out_of_window": excluded, "unknown_ex_date_rows": invalid,
-            "error": error}, raw_rows
+            "error": error,
+            **(diagnostics if status in {"SUCCESS", "UNKNOWN_EX_DATE"} else {})}, raw_rows
 
 
 def collect(snapshot: Path, reference_metadata: Path, *, bs, out: Path,
@@ -376,9 +397,12 @@ def audit_evidence(meta, univ, ledger, raw, *, akshare_events=None,
         required = {"stock_code", "ex_date", "share_multiplier", "cash_per_old_share"}
         if not required.issubset(ak):
             raise ValueError("AkShare candidate CSV missing required columns")
+        other_events = {key: group for key, group in ak.groupby(["stock_code", "ex_date"], sort=False)}
+        own_events = set(zip(candidates.stock_code, candidates.ex_date))
+        requested_codes = set(ledger.stock_code)
         for c in candidates.to_dict("records"):
-            matched = ak.loc[ak.stock_code.eq(c["stock_code"]) & ak.ex_date.eq(c["ex_date"])]
-            if len(matched) == 0:
+            matched = other_events.get((c["stock_code"], c["ex_date"]))
+            if matched is None:
                 # AkShare may not have requested BYD at all in first 10 stocks;
                 # that is NOT a disagreement with BaoStock.
                 outcome = ("BAOSTOCK_ONLY_UNVERIFIED" if
@@ -421,10 +445,9 @@ def audit_evidence(meta, univ, ledger, raw, *, akshare_events=None,
         # range was successfully queried for the relevant stock.
         for rec in ak.to_dict("records"):
             code = str(rec["stock_code"])
-            if code not in set(ledger.stock_code):
+            if code not in requested_codes:
                 continue
-            if not ((candidates.stock_code.eq(code) &
-                     candidates.ex_date.eq(rec["ex_date"])).any()):
+            if (code, rec["ex_date"]) not in own_events:
                 outcome = ("AKSHARE_ONLY_UNVERIFIED" if
                            bao_status_by_code.get(code) == "FETCHED_NOT_VERIFIED"
                            else "BAOSTOCK_NOT_COMPARABLE_YET")
