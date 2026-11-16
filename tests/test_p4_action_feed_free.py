@@ -111,6 +111,8 @@ class FreeFeedTests(unittest.TestCase):
         )
         self.assertEqual(report["failed_or_truncated"], 0)
         self.assertEqual(report["fetched_not_verified"], 2)
+        self.assertEqual(report["endpoint_results"]["cninfo_dividend"]["success"], 2)
+        self.assertEqual(report["endpoint_results"]["sina_dividend"]["success"], 2)
         self.assertEqual(len(events), 1)
         self.assertEqual(events.iloc[0].review_status,
                          "TWO_PUBLIC_SOURCES_MATCH_UNVERIFIED")
@@ -145,6 +147,19 @@ class FreeFeedTests(unittest.TestCase):
         self.assertEqual(controls.iloc[0].status, "INCOMPLETE_FETCH_FOR_CONTROL")
         self.assertEqual(report["issuer_controls_incomplete_fetch"], 1)
         self.assertEqual(report["issuer_controls_mismatch"], 0)
+
+    def test_batch_exposes_per_endpoint_api_failures(self):
+        result = free.fetch_batch(
+            self.snap, ak=PartialModernAk(), offset=0, limit=2,
+            out=self.batchroot/"batch_000000", wait_seconds=0
+        )
+        self.assertEqual(result["api_calls"], 6)
+        self.assertEqual(result["failed_or_truncated_calls"], 2)
+        self.assertEqual(result["endpoint_results"]["cninfo_dividend"]["api_error"], 2)
+        self.assertEqual(result["endpoint_results"]["sina_dividend"]["success"], 2)
+        self.assertEqual(result["endpoint_results"]["sina_rights"]["success"], 2)
+        report, _, _, _, _, _ = free.audit_batches(self.snap, self.batchroot)
+        self.assertEqual(report["endpoint_results"]["cninfo_dividend"]["api_error"], 2)
 
     def test_conflicting_sources_quarantine_event(self):
         self.batch(ak=FakeAk(conflict=True))
