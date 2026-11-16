@@ -22,6 +22,7 @@ CNINFO_URL = "http://webapi.cninfo.com.cn/"
 ENDPOINTS = ("sina_dividend", "cninfo_dividend", "sina_rights")
 SINA_COLS = ("公告日期", "送股", "转增", "派息", "进度", "除权除息日", "股权登记日")
 CNINFO_COLS = ("实施方案公告日期", "送股比例", "转增比例", "派息比例", "除权日", "股权登记日")
+COMPONENTS = ("bonus_per_old_share", "reserve_per_old_share", "cash_per_old_share")
 RIGHTS_COLS = ("公告日期", "配股方案", "配股价格", "除权日", "股权登记日")
 _DATE_FIELDS = {
     "sina_dividend": ("除权除息日", "公告日期"),
@@ -165,7 +166,7 @@ def _prune(table: pd.DataFrame, endpoint: str, cutoff: str) -> tuple[pd.DataFram
 
 
 def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
-                  pipeline: bool = False) -> tuple[dict, pd.DataFrame]:
+                  audit_start: str | None = None) -> tuple[dict, pd.DataFrame]:
     kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
     status, error, rows, dropped = "SUCCESS", "", 0, 0
     try:
@@ -175,13 +176,13 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
         rows = len(frame)
         if rows >= row_cap:
             status = "ROW_LIMIT"
-        elif pipeline and endpoint == "cninfo_dividend" and frame.empty:
+        elif audit_start is not None and endpoint == "cninfo_dividend" and frame.empty:
             status = "UPSTREAM_EMPTY_OR_SCHEMA"
             error = "CNINFO returned an empty response; coverage is unknown"
         else:
             kept, dropped = _prune(frame, endpoint, cutoff)
             kept.insert(0, "request_code", code)
-            if pipeline and dropped:
+            if audit_start is not None and dropped:
                 exfield, annfield = _DATE_FIELDS[endpoint]
                 relevant = frame
                 if endpoint == "sina_dividend":
@@ -189,11 +190,11 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
                 for row in relevant.to_dict("records"):
                     try:
                         ex = valid_day(row[exfield])
-                        if ex < valid_day(cutoff):
+                        if valid_day(audit_start) <= ex < valid_day(cutoff):
                             valid_day(row[annfield])
                     except (ValueError, TypeError):
-                        # Keep usable rows in the evidence, but exclude this
-                        # incomplete result from the effective audit view.
+                        # Preserve valid rows independently of the incomplete
+                        # request coverage disposition.
                         status = "UNKNOWN_EX_DATE"
                         error = "Provider rows have unknown ex or announcement dates"
                         break
@@ -260,7 +261,7 @@ def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
 
 def _number(value) -> float:
     if pd.isna(value) or str(value).strip().lower() in ("", "nan", "none", "nat", "--", "-"):
-        raise ValueError("Missing entitlement amount: " + str(value))
+        return np.nan
     num = float(str(value).replace(",", ""))
     if not np.isfinite(num) or num < 0:
         raise ValueError("Invalid entitlement amount")
@@ -300,19 +301,23 @@ def _normalize(raw: pd.DataFrame, endpoint: str, *, start: str, cutoff: str
                 raise ValueError("Unsupported normalized endpoint")
             if not (ann <= reg < ex):
                 raise ValueError("Publication/record/ex-date order invalid")
-            if gift + reserve + cash == 0:
+            amounts = dict(zip(COMPONENTS, (gift, reserve, cash), strict=True))
+            missing = [field for field, number in amounts.items() if np.isnan(number)]
+            if missing:
+                rejected.append({"stock_code": code, "endpoint": endpoint, "ex_date": str(ex.date()),
+                                 "reason": "Missing entitlement amount: " + "|".join(missing)})
+            if not any(number > 0 for number in amounts.values()):
                 continue
             clean.append({"stock_code": code, "ex_date": str(ex.date()),
-                          "published_on": str(ann.date()),
-                          "share_multiplier": 1 + gift + reserve,
-                          "cash_per_old_share": cash, "record_date": str(reg.date()),
+                          "published_on": str(ann.date()), "share_multiplier": 1 + gift + reserve,
+                          "record_date": str(reg.date()), **amounts,
                           "provider": endpoint, "provider_url": url})
         except (KeyError, ValueError, TypeError) as exc:
             rejected.append({"stock_code": code, "endpoint": endpoint,
                              "ex_date": str(ex.date()) if pd.notna(ex) else "",
                              "reason": f"INVALID:{str(exc)[:140]}"})
     return pd.DataFrame(clean, columns=["stock_code", "ex_date", "published_on",
-                                            "share_multiplier", "cash_per_old_share",
+                                            "share_multiplier", *COMPONENTS,
                                             "record_date", "provider", "provider_url"]), pd.DataFrame(
                                                 rejected, columns=["stock_code", "endpoint", "ex_date", "reason"])
 
@@ -370,7 +375,7 @@ def audit_evidence(meta, universe, ledger, allraw, *, official_events=None):
         per_source = []
         invalid = False
         for vendor, subset in group.groupby("provider"):
-            values = subset[["share_multiplier", "cash_per_old_share", "record_date"]].drop_duplicates()
+            values = subset[[*COMPONENTS, "record_date"]].drop_duplicates()
             if len(values) != 1:
                 conflicts.append({"stock_code": code, "ex_date": ex,
                                   "reason": f"CONFLICTING_{vendor}"})
@@ -381,26 +386,28 @@ def audit_evidence(meta, universe, ledger, allraw, *, official_events=None):
             continue
         if len(per_source) == 2:
             first, second = per_source
-            if (not np.isclose(float(first.share_multiplier), float(second.share_multiplier), atol=1e-6, rtol=0) or
-                    not np.isclose(float(first.cash_per_old_share), float(second.cash_per_old_share), atol=1e-6, rtol=0) or
-                    first.record_date != second.record_date):
+            observed = [field for field in COMPONENTS if pd.notna(first[field]) and pd.notna(second[field])]
+            if (first.record_date != second.record_date
+                    or any(not np.isclose(first[field], second[field], atol=1e-6, rtol=0)
+                           for field in observed)):
                 conflicts.append({"stock_code": code, "ex_date": ex,
                                   "reason": "SINA_CNINFO_TERMS_MISMATCH"})
                 continue
-            status = "TWO_PUBLIC_SOURCES_MATCH_UNVERIFIED"
+            status = ("TWO_PUBLIC_SOURCES_MATCH_UNVERIFIED" if len(observed) == len(COMPONENTS)
+                      else "TWO_PUBLIC_SOURCES_PARTIAL_FIELDS_UNRESOLVED")
         else:
             status = f"SINGLE_SOURCE_{per_source[0].provider.upper()}_UNVERIFIED"
-        chosen = per_source[0]
+        chosen = min(per_source, key=lambda row: sum(pd.isna(row[field]) for field in COMPONENTS))
         candidates.append({"stock_code":code, "ex_date":ex,
                            "published_on":max(x.published_on for x in per_source),
                            "record_date":chosen.record_date,
                            "share_multiplier":float(chosen.share_multiplier),
-                           "cash_per_old_share":float(chosen.cash_per_old_share),
+                           **{field:float(chosen[field]) for field in COMPONENTS},
                            "source_url":CNINFO_URL if len(per_source)==2 else chosen.provider_url,
                            "source_id":f"UNVERIFIED-AKSHARE:{code}:{ex}",
                            "review_status":status,"sources_seen":"|".join(sorted(x.provider for x in per_source))})
     events = pd.DataFrame(candidates, columns=["stock_code","ex_date","published_on",
-        "record_date","share_multiplier","cash_per_old_share","source_url","source_id","review_status","sources_seen"])
+        "record_date","share_multiplier",*COMPONENTS,"source_url","source_id","review_status","sources_seen"])
     issues = pd.concat([rejects, pd.DataFrame([{"stock_code":item["stock_code"],
           "endpoint":"cross_source", "ex_date":item["ex_date"], "reason":item["reason"]} for item in conflicts])], ignore_index=True)
     if issues.empty:

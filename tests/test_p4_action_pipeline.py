@@ -201,6 +201,56 @@ class PipelineTests(unittest.TestCase):
                "进度": "实施", "送股": "", "转增": "0", "派息": "5"}
         candidates, issues = p.free._normalize(pd.DataFrame([day]), "sina_dividend",
                                               start="2024-12-01", cutoff=p.CUTOFF)
-        self.assertTrue(candidates.empty)
+        self.assertEqual(len(candidates), 1)
+        self.assertTrue(pd.isna(candidates.iloc[0].bonus_per_old_share))
+        self.assertTrue(pd.isna(candidates.iloc[0].share_multiplier))
         self.assertIn("Missing entitlement amount", issues.iloc[0].reason)
         self.assertEqual(issues.iloc[0].ex_date, "2025-03-05")
+
+    def test_redistributed_bonus_and_reserve_do_not_match(self):
+        def provider(task):
+            code = task.stock_code
+            if task.endpoint == "sina_dividend":
+                return {"status": "SUCCESS", "response_rows": 1}, [{
+                    "request_code": code, "公告日期": "2025-03-01", "除权除息日": "2025-03-05",
+                    "股权登记日": "2025-03-04", "进度": "实施", "送股": "1", "转增": "2", "派息": "5",
+                }]
+            if task.endpoint == p.BAO and task.year == 2025:
+                return {"status": "SUCCESS", "response_rows": 1}, [{
+                    "request_code": code, "query_year": 2025, "code": "sz." + code,
+                    "dividPlanDate": "2025-03-01", "dividOperateDate": "2025-03-05",
+                    "dividRegistDate": "2025-03-04", "dividStocksPs": "0.2",
+                    "dividReserveToStockPs": "0.1", "dividCashPsBeforeTax": "0.5",
+                }]
+            return self.success(task)
+
+        summary, code = self.first_run(provider, limit="1")
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["baostock_full_field_matches"], 0)
+        self.assertEqual(summary["date_or_amount_conflicts"], 1)
+
+    def test_old_known_ex_date_does_not_cause_request_failure(self):
+        class Ak:
+            def stock_dividend_cninfo(self, symbol):
+                return pd.DataFrame([dict(zip(p.free.CNINFO_COLS,
+                                               ["", 0, 0, 2, "1993-05-17", "1993-05-14"],
+                                               strict=True))])
+
+        result, raw = p.free.fetch_request(Ak(), "000001", "cninfo_dividend",
+                                           cutoff=p.CUTOFF, row_cap=1000, audit_start="2024-12-01")
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertTrue(raw.empty)
+
+    def test_incomplete_request_retains_independently_valid_rows(self):
+        def provider(task):
+            if task.endpoint == "sina_dividend":
+                return {"status": "UNKNOWN_EX_DATE", "response_rows": 2}, [{
+                    "request_code": task.stock_code, "公告日期": "2025-03-01", "除权除息日": "2025-03-05",
+                    "股权登记日": "2025-03-04", "进度": "实施", "送股": "0", "转增": "0", "派息": "5",
+                }]
+            return self.success(task)
+
+        summary, code = self.first_run(provider, limit="1")
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["terminal_exceptions"], 1)
+        self.assertEqual(summary["unique_candidate_events"], 1)

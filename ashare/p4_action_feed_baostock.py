@@ -24,6 +24,11 @@ RAW_FIELDS = (
     "code", "dividPlanDate", "dividRegistDate", "dividOperateDate",
     "dividCashPsBeforeTax", "dividStocksPs", "dividReserveToStockPs",
 )
+AMOUNT_COLUMNS = {
+    "dividStocksPs": "bonus_per_old_share",
+    "dividReserveToStockPs": "reserve_per_old_share",
+    "dividCashPsBeforeTax": "cash_per_old_share",
+}
 CAUTION = (
     "Third-party free historical dividends: EMPTY or successful retrieval does NOT "
     "prove complete historical corporate actions. BaoStock is a corroborating "
@@ -230,7 +235,7 @@ def normalize(raw: pd.DataFrame, *, start: str, cutoff: str
             if not (announced <= registration < ex):
                 raise ValueError("Invalid implementation/registration/ex-date order")
             amounts, blank_fields = [], []
-            for name in ("dividStocksPs", "dividReserveToStockPs", "dividCashPsBeforeTax"):
+            for name in AMOUNT_COLUMNS:
                 value = str(r[name]).strip()
                 if value.lower() in ("", "none", "nan", "nat", "--"):
                     blank_fields.append(name)
@@ -249,6 +254,7 @@ def normalize(raw: pd.DataFrame, *, start: str, cutoff: str
                                "published_on": str(announced.date()),
                                "record_date": str(registration.date()),
                                "share_multiplier": 1.0 + shares + reserve,
+                               "bonus_per_old_share": shares, "reserve_per_old_share": reserve,
                                "cash_per_old_share": cash,
                                "source_id": f"UNVERIFIED-BAOSTOCK:{code}:{ex.date()}",
                                "source_url": SOURCE,
@@ -261,7 +267,7 @@ def normalize(raw: pd.DataFrame, *, start: str, cutoff: str
                            "reason": f"INVALID_BAOSTOCK_ROW:{str(exc)[:160]}"})
     candidate_df = pd.DataFrame(candidates, columns=(
         "stock_code", "ex_date", "published_on", "record_date",
-        "share_multiplier", "cash_per_old_share", "source_id", "source_url",
+        "share_multiplier", *AMOUNT_COLUMNS.values(), "source_id", "source_url",
         "review_status", "blank_amount_fields"))
     issues_df = pd.DataFrame(issues, columns=("stock_code", "ex_date", "reason"))
     if candidate_df.empty:
@@ -385,21 +391,27 @@ def audit_evidence(meta, univ, ledger, raw, *, akshare_events=None,
                 # blank. Normalization keeps a provisional zero for arithmetic,
                 # but that zero must NOT become independent evidence of "no
                 # bonus / no capitalization". Check only the observed terms.
-                observed = set(str(c["blank_amount_fields"]).split("|")) - {""}
-                share_equal = np.isclose(
-                    float(matched.iloc[0].share_multiplier),
-                    float(c["share_multiplier"]), rtol=0, atol=1e-6)
-                cash_equal = np.isclose(
-                    float(matched.iloc[0].cash_per_old_share),
-                    float(c["cash_per_old_share"]), rtol=0, atol=1e-6)
-                share_complete = not ({"dividStocksPs", "dividReserveToStockPs"} & observed)
-                cash_complete = "dividCashPsBeforeTax" not in observed
-                if ("record_date" in matched and matched.iloc[0].record_date
-                        and matched.iloc[0].record_date != c["record_date"]):
+                unknown = set(str(c["blank_amount_fields"]).split("|")) - {""}
+                other = matched.iloc[0]
+                if set(AMOUNT_COLUMNS.values()).issubset(matched.columns):
+                    fields = {column for raw_field, column in AMOUNT_COLUMNS.items()
+                              if raw_field not in unknown and pd.notna(other[column]) and other[column] != ""}
+                    partial = len(fields) < len(AMOUNT_COLUMNS)
+                else:
+                    # Legacy AkShare exports only carry the combined stock multiplier.
+                    fields = set()
+                    if not {"dividStocksPs", "dividReserveToStockPs"}.intersection(unknown):
+                        fields.add("share_multiplier")
+                    if "dividCashPsBeforeTax" not in unknown:
+                        fields.add("cash_per_old_share")
+                    partial = bool(unknown)
+                if ("record_date" in matched and pd.notna(other.record_date)
+                        and other.record_date and other.record_date != c["record_date"]):
                     outcome = "BAOSTOCK_AKSHARE_DATE_CONFLICT"
-                elif (share_complete and not share_equal) or (cash_complete and not cash_equal):
+                elif any(not np.isclose(float(other[field]), float(c[field]), rtol=0, atol=1e-6)
+                         for field in fields):
                     outcome = "BAOSTOCK_AKSHARE_TERMS_CONFLICT"
-                elif observed:
+                elif partial:
                     outcome = "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED"
                 else:
                     outcome = "BAOSTOCK_AKSHARE_MATCH_UNVERIFIED"

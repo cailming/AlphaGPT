@@ -355,7 +355,8 @@ class Providers:
             with deadline(self.timeout), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 if task.endpoint != BAO:
                     entry, rows = free.fetch_request(self.ak, task.stock_code, task.endpoint,
-                                                     cutoff=CUTOFF, row_cap=1000, pipeline=True)
+                                                     cutoff=CUTOFF, row_cap=1000,
+                                                     audit_start=str(self.begin.date()))
                     return entry, rows.astype("string").fillna("").to_dict("records")
                 if bao._provider_code(task.stock_code) and not self.logged_in:
                     login = self.bs.login()
@@ -407,6 +408,9 @@ def tables(evidence, codes, tasks):
         planned="size", successful=lambda x: int(x.eq(SUCCESS).sum()),
         unsuccessful=lambda x: int(x.isin(["RETRY_PENDING", "TERMINAL_EXCEPTION"]).sum()),
         not_fetched=lambda x: int(x.eq("NOT_FETCHED").sum())).reset_index()
+    empty = status.state.eq(SUCCESS) & status.response_rows.eq(0)
+    health["successful_empty_responses"] = health.endpoint.map(
+        status.loc[empty].groupby("endpoint").size()).fillna(0).astype(int)
     health["success_rate_observed"] = health.successful.div(
         (health.successful + health.unsuccessful).replace(0, pd.NA))
     ak_ledger, bao_ledger, bao_raw = [], [], []
@@ -429,12 +433,10 @@ def tables(evidence, codes, tasks):
         entry = result.entry | {"status": result.category}
         if task.endpoint == BAO:
             bao_ledger.append(entry)
-            if result.category == SUCCESS:
-                bao_raw.extend(result.rows)
+            bao_raw.extend(result.rows)
         else:
             ak_ledger.append(entry)
-            if result.category == SUCCESS:
-                ak_raw[task.endpoint].extend(result.rows)
+            ak_raw[task.endpoint].extend(result.rows)
     ak_report, ak_actions, ak_stocks, ak_issues, rights, ak_controls = free.audit_evidence(
         evidence.meta, scope, frame(ak_ledger, AK_COLUMNS),
         {ep: frame(rows, ("request_code",) + free._cols(ep)) for ep, rows in ak_raw.items()},
@@ -491,13 +493,21 @@ def write_report(evidence, codes, checkpoint):
             audit_issue(item.stock_code, item.ex_date, BAO, item.result, "P1",
                         "Resolve BaoStock and issuer control difference")
 
-    exceptions = pd.DataFrame(exceptions, columns=EXCEPTION_COLUMNS).drop_duplicates(
-        ["stock_code", "date_or_year", "source", "category"]).sort_values(
-        ["priority", "stock_code", "date_or_year", "source"], key=lambda x: x.astype(str))
-    ak = ak[["stock_code", "ex_date", "record_date", "review_status", "sources_seen"]].rename(
-        columns={"review_status": "akshare_result", "record_date": "akshare_record_date"})
-    bs = bs[["stock_code", "ex_date", "record_date", "blank_amount_fields"]].rename(
-        columns={"record_date": "baostock_record_date"})
+    dates = ak[["stock_code", "ex_date", "record_date"]].merge(
+        bs[["stock_code", "ex_date", "record_date"]], on=["stock_code", "record_date"],
+        suffixes=("_akshare", "_baostock"))
+    for row in dates.loc[dates.ex_date_akshare.ne(dates.ex_date_baostock)].itertuples(index=False):
+        audit_issue(row.stock_code, row.ex_date_akshare, "cross_source", "EX_DATE_MISMATCH",
+                    "P1", "Check same record date with BaoStock ex-date " + row.ex_date_baostock)
+    key_columns = ["stock_code", "ex_date"]
+    ak = ak[key_columns + ["record_date", "review_status", "sources_seen", *free.COMPONENTS]].rename(
+        columns={"review_status": "akshare_result", "record_date": "akshare_record_date",
+                 **{field: "akshare_" + field for field in free.COMPONENTS}})
+    bs = bs[key_columns + ["record_date", "blank_amount_fields", *free.COMPONENTS]].copy()
+    for raw_field, column in bao.AMOUNT_COLUMNS.items():
+        bs[column] = bs[column].where(~bs.blank_amount_fields.str.contains(raw_field, regex=False), None)
+    bs = bs.rename(columns={"record_date": "baostock_record_date",
+                            **{field: "baostock_" + field for field in free.COMPONENTS}})
     reconciliation = ak.merge(bs, on=["stock_code", "ex_date"], how="outer", validate="one_to_one")
     comparisons = compare[compare.result.ne("INVALID_BAOSTOCK_ROW")]
     reconciliation = reconciliation.merge(comparisons[["stock_code", "ex_date", "result"]],
@@ -507,6 +517,9 @@ def write_report(evidence, codes, checkpoint):
         observed + reconciliation.baostock_record_date.notna().astype(int))
     reconciliation["evidence"] = reconciliation.stock_code.map(sources_by_code)
 
+    exceptions = pd.DataFrame(exceptions, columns=EXCEPTION_COLUMNS).drop_duplicates(
+        ["stock_code", "date_or_year", "source", "category"]).sort_values(
+        ["priority", "stock_code", "date_or_year", "source"], key=lambda x: x.astype(str))
     complete_requests = int(status.state.eq(SUCCESS).sum())
     terminal = int(status.state.eq("TERMINAL_EXCEPTION").sum())
     offered = len(status)
@@ -551,6 +564,8 @@ def write_report(evidence, codes, checkpoint):
         "unique_candidate_events": len(reconciliation),
         "akshare_candidate_events": len(ak), "baostock_candidate_events": len(bs),
         "sina_cninfo_matches": int(ak.akshare_result.eq("TWO_PUBLIC_SOURCES_MATCH_UNVERIFIED").sum()),
+        "sina_cninfo_partial_field_matches_unresolved": int(
+            ak.akshare_result.eq("TWO_PUBLIC_SOURCES_PARTIAL_FIELDS_UNRESOLVED").sum()),
         "baostock_full_field_matches": bao_report["cross_source_fully_observed_matches"],
         "baostock_partial_field_matches_unresolved": bao_report["cross_source_partial_amount_fields_unresolved"],
         "baostock_candidates_with_unknown_fields": int(bs.blank_amount_fields.ne("").sum()),
