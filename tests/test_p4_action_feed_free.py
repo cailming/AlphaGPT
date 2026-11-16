@@ -219,6 +219,31 @@ class FreeFeedTests(unittest.TestCase):
         report,_,_,_,_,_=free.audit_batches(self.snap,self.batchroot)
         self.assertEqual(report["cninfo_upstream_ambiguous_calls"],0)
 
+    def test_legacy_chronology_errors_outside_audit_window_not_issues(self):
+        # A real-world case on 000014: 1993-06-30 announcement is after
+        # 1993-05-17 ex-date, but 1993 is outside this P4 audit interval.
+        old = CNINFO | {
+            "request_code": "000014",
+            "实施方案公告日期": "1993-06-30",
+            "股权登记日": "1993-05-14",
+            "除权日": "1993-05-17",
+        }
+        candidates, bad = free._normalize(pd.DataFrame([old]), "cninfo_dividend",
+                                          start="2024-12-01", cutoff="2026-06-12")
+        self.assertTrue(candidates.empty)
+        self.assertTrue(bad.empty)
+        # The same inconsistent chronology inside the interval is rejected.
+        current = old | {
+            "实施方案公告日期": "2025-07-30",
+            "股权登记日": "2025-07-28",
+            "除权日": "2025-07-29",
+        }
+        candidates2, bad2 = free._normalize(pd.DataFrame([current]), "cninfo_dividend",
+                                            start="2024-12-01", cutoff="2026-06-12")
+        self.assertTrue(candidates2.empty)
+        self.assertEqual(len(bad2), 1)
+        self.assertIn("order invalid", bad2.iloc[0]["reason"])
+
     def test_tampered_raw_files_fail_sha256_audit(self):
         path=self.batch()
         raw=path/"raw_sina_dividend.csv"
