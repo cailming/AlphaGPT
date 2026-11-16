@@ -115,6 +115,47 @@ def _response_rows(result, *, cap: int) -> tuple[list[dict], int]:
     return records, len(records)
 
 
+def fetch_query(bs, code: str, year: int, *, begin, cut, cap: int
+                ) -> tuple[dict, list[dict]]:
+    bs_code = _provider_code(code)
+    status, error, row_count, excluded, invalid = "SUCCESS", "", 0, 0, 0
+    raw_rows = []
+    if bs_code is None:
+        status, error = "UNSUPPORTED_EXCHANGE", "No verified SH/SZ BaoStock code mapping"
+    else:
+        try:
+            rs = bs.query_dividend_data(code=bs_code, year=str(year), yearType="operate")
+            retrieved, row_count = _response_rows(rs, cap=cap)
+            for item in retrieved:
+                if item["code"] != bs_code:
+                    raise ValueError("Provider returned incorrect security code")
+                ex = _nullable_day(item["dividOperateDate"])
+                if pd.isna(ex) or ex.year != year:
+                    invalid += 1
+                    continue
+                if ex < begin or ex >= cut:
+                    excluded += 1
+                    continue
+                if any(_nullable_day(item[col]) >= cut for col in ("dividPlanDate", "dividRegistDate")):
+                    excluded += 1
+                    continue
+                raw_rows.append({"request_code": code, "query_year": year,
+                                 **{k: str(item[k]) for k in RAW_FIELDS}})
+            if invalid:
+                status = "UNKNOWN_EX_DATE"
+                error = f"{invalid} provider rows lack valid ex-date and were NOT saved"
+        except OverflowError as exc:
+            status, error = "ROW_LIMIT", str(exc)
+            raw_rows = []
+        except Exception as exc:
+            status, error = "API_ERROR", f"{type(exc).__name__}: {str(exc)[:180]}"
+            raw_rows = []
+    return {"stock_code": code, "bs_code": bs_code or "", "year": year, "status": status,
+            "response_rows": row_count, "saved_rows": len(raw_rows),
+            "excluded_out_of_window": excluded, "unknown_ex_date_rows": invalid,
+            "error": error}, raw_rows
+
+
 def collect(snapshot: Path, reference_metadata: Path, *, bs, out: Path,
             codes: list[str], years: list[int], wait_seconds: float = 1.0,
             cap: int = 1000) -> dict:
@@ -143,53 +184,9 @@ def collect(snapshot: Path, reference_metadata: Path, *, bs, out: Path,
         for code in codes:
             bs_code = _provider_code(code)
             for year in years:
-                status, error, row_count, saved, excluded, invalid = "SUCCESS", "", 0, 0, 0, 0
-                if bs_code is None:
-                    status, error = "UNSUPPORTED_EXCHANGE", "No verified SH/SZ BaoStock code mapping"
-                else:
-                    try:
-                        rs = bs.query_dividend_data(code=bs_code, year=str(year), yearType="operate")
-                        retrieved, row_count = _response_rows(rs, cap=cap)
-                        for item in retrieved:
-                            if item["code"] != bs_code:
-                                raise ValueError("Provider returned incorrect security code")
-                            ex = _nullable_day(item["dividOperateDate"])
-                            # Never export rows with unknown ex-date: cannot enforce
-                            # old-test holdout; mark this query as incomplete.
-                            if pd.isna(ex):
-                                invalid += 1
-                                continue
-                            if ex.year != year:
-                                invalid += 1
-                                continue
-                            if ex < begin or ex >= cut:
-                                excluded += 1
-                                continue
-                            plan = _nullable_day(item["dividPlanDate"])
-                            if pd.notna(plan) and plan >= cut:
-                                excluded += 1
-                                continue
-                            raw_rows.append({"request_code": code, "query_year": year,
-                                             **{k: str(item[k]) for k in RAW_FIELDS}})
-                            saved += 1
-                        if invalid:
-                            status = "UNKNOWN_EX_DATE"
-                            error = f"{invalid} provider rows lack valid ex-date and were NOT saved"
-                    except OverflowError as exc:
-                        status, error = "ROW_LIMIT", str(exc)
-                        # Never commit partial rows from a truncated query.
-                        raw_rows = [r for r in raw_rows if not (
-                            r["request_code"] == code and r["query_year"] == year)]
-                        saved = 0
-                    except Exception as exc:
-                        status, error = "API_ERROR", f"{type(exc).__name__}: {str(exc)[:180]}"
-                        raw_rows = [r for r in raw_rows if not (
-                            r["request_code"] == code and r["query_year"] == year)]
-                        saved = 0
-                logs.append({"stock_code": code, "bs_code": bs_code or "",
-                             "year": year, "status": status, "response_rows": row_count,
-                             "saved_rows": saved, "excluded_out_of_window": excluded,
-                             "unknown_ex_date_rows": invalid, "error": error})
+                entry, rows = fetch_query(bs, code, year, begin=begin, cut=cut, cap=cap)
+                logs.append(entry)
+                raw_rows.extend(rows)
                 if wait_seconds and bs_code is not None:
                     time.sleep(wait_seconds)
     finally:
@@ -318,6 +315,20 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
         raws.append(raw)
     ledger = pd.concat(ledgers, ignore_index=True)
     raw = pd.concat(raws, ignore_index=True)
+    return audit_evidence(
+        meta, univ, ledger, raw,
+        akshare_events=(pd.read_csv(akshare_events, dtype="string", keep_default_na=False,
+                                   encoding="utf-8-sig") if akshare_events is not None else None),
+        akshare_stock_coverage=(pd.read_csv(akshare_stock_coverage, dtype="string",
+                                           encoding="utf-8-sig")
+                                if akshare_stock_coverage is not None else None),
+        issuer_controls=issuer_controls,
+    )
+
+
+def audit_evidence(meta, univ, ledger, raw, *, akshare_events=None,
+                   akshare_stock_coverage=None, issuer_controls=None):
+    """Corroborate an authenticated effective view with existing audit rules."""
     candidates, bad = normalize(raw, start=meta["start"], cutoff=meta["test_start_EXCLUDED"])
     query_status = ledger.groupby("stock_code").agg(
         requested_years=("year", "nunique"),
@@ -341,7 +352,7 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
     # Source coverage must be known before calling absent events a mismatch.
     ak_status_by_code = {}
     if akshare_stock_coverage is not None:
-        other = pd.read_csv(akshare_stock_coverage, dtype="string", encoding="utf-8-sig")
+        other = akshare_stock_coverage
         if not {"stock_code", "coverage_status"} <= set(other):
             raise ValueError("AkShare coverage CSV missing required columns")
         if other.stock_code.duplicated().any():
@@ -355,7 +366,7 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
                                   stock.provider_status.astype(str)))
     mismatches = []
     if akshare_events is not None:
-        ak = pd.read_csv(akshare_events, dtype="string", keep_default_na=False, encoding="utf-8-sig")
+        ak = akshare_events
         required = {"stock_code", "ex_date", "share_multiplier", "cash_per_old_share"}
         if not required.issubset(ak):
             raise ValueError("AkShare candidate CSV missing required columns")
@@ -383,7 +394,10 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
                     float(c["cash_per_old_share"]), rtol=0, atol=1e-6)
                 share_complete = not ({"dividStocksPs", "dividReserveToStockPs"} & observed)
                 cash_complete = "dividCashPsBeforeTax" not in observed
-                if (share_complete and not share_equal) or (cash_complete and not cash_equal):
+                if ("record_date" in matched and matched.iloc[0].record_date
+                        and matched.iloc[0].record_date != c["record_date"]):
+                    outcome = "BAOSTOCK_AKSHARE_DATE_CONFLICT"
+                elif (share_complete and not share_equal) or (cash_complete and not cash_equal):
                     outcome = "BAOSTOCK_AKSHARE_TERMS_CONFLICT"
                 elif observed:
                     outcome = "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED"
@@ -458,7 +472,7 @@ def audit(snapshot: Path, reference_metadata: Path, batches: Path, *,
         "cross_source_partial_amount_fields_unresolved": int(compare.result.eq(
             "BAOSTOCK_AKSHARE_PARTIAL_AMOUNT_FIELDS_UNRESOLVED").sum()),
         "cross_source_disagreements_or_missing": int(compare.result.isin([
-            "BAOSTOCK_AKSHARE_TERMS_CONFLICT", "BAOSTOCK_ONLY_UNVERIFIED",
+            "BAOSTOCK_AKSHARE_TERMS_CONFLICT", "BAOSTOCK_AKSHARE_DATE_CONFLICT", "BAOSTOCK_ONLY_UNVERIFIED",
             "AKSHARE_ONLY_UNVERIFIED", "AKSHARE_DUPLICATE_UNRESOLVED"
         ]).sum()),
         "cross_source_not_comparable_yet": int(compare.result.isin([

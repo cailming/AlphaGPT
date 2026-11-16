@@ -23,6 +23,11 @@ ENDPOINTS = ("sina_dividend", "cninfo_dividend", "sina_rights")
 SINA_COLS = ("公告日期", "送股", "转增", "派息", "进度", "除权除息日", "股权登记日")
 CNINFO_COLS = ("实施方案公告日期", "送股比例", "转增比例", "派息比例", "除权日", "股权登记日")
 RIGHTS_COLS = ("公告日期", "配股方案", "配股价格", "除权日", "股权登记日")
+_DATE_FIELDS = {
+    "sina_dividend": ("除权除息日", "公告日期"),
+    "cninfo_dividend": ("除权日", "实施方案公告日期"),
+    "sina_rights": ("除权日", "公告日期"),
+}
 NOTE = (
     "AKSHARE SINA/CNINFO FREE PUBLIC DATA ONLY. Upstream may be unstable, "
     "licensed or incomplete; a successful EMPTY response is NOT proof that "
@@ -147,11 +152,7 @@ def _prune(table: pd.DataFrame, endpoint: str, cutoff: str) -> tuple[pd.DataFram
         raise ValueError(f"API schema drift in {endpoint}: {set(required)-set(table)}")
     keepcols = (["request_code"] if "request_code" in table.columns else []) + list(required)
     d = table.loc[:, keepcols].copy()
-    exfield, annfield = {
-        "sina_dividend": ("除权除息日", "公告日期"),
-        "cninfo_dividend": ("除权日", "实施方案公告日期"),
-        "sina_rights": ("除权日", "公告日期"),
-    }[endpoint]
+    exfield, annfield = _DATE_FIELDS[endpoint]
     cut = valid_day(cutoff)
     keep = []
     for row in d.to_dict("records"):
@@ -161,6 +162,54 @@ def _prune(table: pd.DataFrame, endpoint: str, cutoff: str) -> tuple[pd.DataFram
         except (ValueError, TypeError):
             keep.append(False)
     return d.loc[keep].copy(), len(d) - sum(keep)
+
+
+def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
+                  pipeline: bool = False) -> tuple[dict, pd.DataFrame]:
+    kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
+    status, error, rows, dropped = "SUCCESS", "", 0, 0
+    try:
+        frame = _endpoint(ak, code, endpoint)
+        if not isinstance(frame, pd.DataFrame):
+            raise ValueError("API result is not DataFrame")
+        rows = len(frame)
+        if rows >= row_cap:
+            status = "ROW_LIMIT"
+        elif pipeline and endpoint == "cninfo_dividend" and frame.empty:
+            status = "UPSTREAM_EMPTY_OR_SCHEMA"
+            error = "CNINFO returned an empty response; coverage is unknown"
+        else:
+            kept, dropped = _prune(frame, endpoint, cutoff)
+            kept.insert(0, "request_code", code)
+            if pipeline and dropped:
+                exfield, annfield = _DATE_FIELDS[endpoint]
+                relevant = frame
+                if endpoint == "sina_dividend":
+                    relevant = frame.loc[frame["进度"].eq("实施")]
+                for row in relevant.to_dict("records"):
+                    try:
+                        ex = valid_day(row[exfield])
+                        if ex < valid_day(cutoff):
+                            valid_day(row[annfield])
+                    except (ValueError, TypeError):
+                        # Keep usable rows in the evidence, but exclude this
+                        # incomplete result from the effective audit view.
+                        status = "UNKNOWN_EX_DATE"
+                        error = "Provider rows have unknown ex or announcement dates"
+                        break
+    except Exception as exc:
+        if (endpoint == "cninfo_dividend" and isinstance(exc, KeyError)
+                and "实施方案公告日期" in str(exc)):
+            status = "UPSTREAM_EMPTY_OR_SCHEMA"
+            error = ("CNINFO parser could not locate 实施方案公告日期; "
+                     "upstream may have zero records or schema drift; "
+                     "not a verified empty action history")
+        else:
+            status = "API_ERROR"
+            error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
+    return {"stock_code": code, "endpoint": endpoint, "status": status,
+            "response_rows": rows, "dropped_future_or_invalid": dropped, "error": error}, kept
 
 
 def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
@@ -175,37 +224,11 @@ def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
     ledger = []
     for code in chosen.stock_code:
         for endpoint in ENDPOINTS:
-            status, error, rows, dropped = "SUCCESS", "", 0, 0
-            try:
-                frame = _endpoint(ak, str(code), endpoint)
-                if not isinstance(frame, pd.DataFrame):
-                    raise ValueError("API result is not DataFrame")
-                rows = len(frame)
-                if rows >= row_cap:
-                    status = "ROW_LIMIT"
-                else:
-                    kept, dropped = _prune(frame, endpoint, meta["test_start_EXCLUDED"])
-                    if not kept.empty:
-                        kept.insert(0, "request_code", str(code))
-                        raws[endpoint].append(kept)
-            except Exception as exc:
-                # AKShare's CNINFO parser directly indexes the announcement
-                # column after DataFrame(records). A KeyError may mean either
-                # records=[] OR a provider schema change. We cannot distinguish
-                # these from the parser exception alone: never call it SUCCESS
-                # and NEVER infer that this stock had no corporate actions.
-                if (endpoint == "cninfo_dividend" and isinstance(exc, KeyError)
-                        and "实施方案公告日期" in str(exc)):
-                    status = "UPSTREAM_EMPTY_OR_SCHEMA"
-                    error = ("CNINFO parser could not locate 实施方案公告日期; "
-                             "upstream may have zero records or schema drift; "
-                             "not a verified empty action history")
-                else:
-                    status = "API_ERROR"
-                    error = f"{type(exc).__name__}: {str(exc)[:200]}"
-            ledger.append({"stock_code": code, "endpoint": endpoint,
-                           "status": status, "response_rows": rows,
-                           "dropped_future_or_invalid": dropped, "error": error})
+            entry, kept = fetch_request(ak, str(code), endpoint,
+                                        cutoff=meta["test_start_EXCLUDED"], row_cap=row_cap)
+            if not kept.empty:
+                raws[endpoint].append(kept)
+            ledger.append(entry)
             if wait_seconds:
                 time.sleep(wait_seconds)
     if len(ledger) != len(chosen)*len(ENDPOINTS):
@@ -237,7 +260,7 @@ def fetch_batch(snapshot: Path, *, ak, offset: int, limit: int,
 
 def _number(value) -> float:
     if pd.isna(value) or str(value).strip().lower() in ("", "nan", "none", "nat", "--", "-"):
-        return 0.0
+        raise ValueError("Missing entitlement amount: " + str(value))
     num = float(str(value).replace(",", ""))
     if not np.isfinite(num) or num < 0:
         raise ValueError("Invalid entitlement amount")
@@ -250,6 +273,7 @@ def _normalize(raw: pd.DataFrame, endpoint: str, *, start: str, cutoff: str
     lo, cut = valid_day(start), valid_day(cutoff)
     for row in raw.to_dict("records"):
         code = str(row["request_code"])
+        ex = pd.NaT
         try:
             code6(code)
             if endpoint == "sina_dividend":
@@ -285,11 +309,12 @@ def _normalize(raw: pd.DataFrame, endpoint: str, *, start: str, cutoff: str
                           "provider": endpoint, "provider_url": url})
         except (KeyError, ValueError, TypeError) as exc:
             rejected.append({"stock_code": code, "endpoint": endpoint,
+                             "ex_date": str(ex.date()) if pd.notna(ex) else "",
                              "reason": f"INVALID:{str(exc)[:140]}"})
     return pd.DataFrame(clean, columns=["stock_code", "ex_date", "published_on",
                                             "share_multiplier", "cash_per_old_share",
                                             "record_date", "provider", "provider_url"]), pd.DataFrame(
-                                                rejected, columns=["stock_code", "endpoint", "reason"])
+                                                rejected, columns=["stock_code", "endpoint", "ex_date", "reason"])
 
 
 def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | None = None
@@ -326,6 +351,11 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
         if removed:
             raise ValueError("Old test/future or invalid-date rows found in persisted batch")
         allraw[endpoint] = kept
+    return audit_evidence(meta, universe, ledger, allraw, official_events=official_events)
+
+
+def audit_evidence(meta, universe, ledger, allraw, *, official_events=None):
+    """Audit an already authenticated, non-overlapping effective request view."""
     normalized = []
     rejected = []
     for endpoint in ("sina_dividend", "cninfo_dividend"):
@@ -363,15 +393,16 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
         chosen = per_source[0]
         candidates.append({"stock_code":code, "ex_date":ex,
                            "published_on":max(x.published_on for x in per_source),
+                           "record_date":chosen.record_date,
                            "share_multiplier":float(chosen.share_multiplier),
                            "cash_per_old_share":float(chosen.cash_per_old_share),
                            "source_url":CNINFO_URL if len(per_source)==2 else chosen.provider_url,
                            "source_id":f"UNVERIFIED-AKSHARE:{code}:{ex}",
                            "review_status":status,"sources_seen":"|".join(sorted(x.provider for x in per_source))})
     events = pd.DataFrame(candidates, columns=["stock_code","ex_date","published_on",
-        "share_multiplier","cash_per_old_share","source_url","source_id","review_status","sources_seen"])
+        "record_date","share_multiplier","cash_per_old_share","source_url","source_id","review_status","sources_seen"])
     issues = pd.concat([rejects, pd.DataFrame([{"stock_code":item["stock_code"],
-          "endpoint":"cross_source", "reason":item["reason"]} for item in conflicts])], ignore_index=True)
+          "endpoint":"cross_source", "ex_date":item["ex_date"], "reason":item["reason"]} for item in conflicts])], ignore_index=True)
     if issues.empty:
         issues = pd.DataFrame(columns=["stock_code","endpoint","reason"])
     # A historical rights endpoint returns *all* past rights issues. Count
@@ -384,7 +415,8 @@ def audit_batches(snapshot: Path, batch_root: Path, *, official_events: Path | N
     )
     rights_rows = rights_history.loc[rights_relevant].copy()
     rights_rows["review_status"] = "RIGHTS_SUBSCRIPTION_UNSUPPORTED_FOR_ECONOMIC_LABEL"
-    endpoints = ledger.pivot(index="stock_code", columns="endpoint", values="status")
+    endpoints = ledger.pivot(index="stock_code", columns="endpoint", values="status").reindex(
+        columns=ENDPOINTS)
     stock = universe.merge(endpoints.reset_index(), on="stock_code", how="left",validate="one_to_one")
     stock["coverage_status"] = np.select(
         [stock[list(ENDPOINTS)].isna().any(axis=1),
