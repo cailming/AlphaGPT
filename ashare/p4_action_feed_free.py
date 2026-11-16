@@ -255,12 +255,20 @@ def _normalize(raw: pd.DataFrame, endpoint: str, *, start: str, cutoff: str
             if endpoint == "sina_dividend":
                 if str(row["进度"]).strip() != "实施":
                     continue
-                ex, ann = valid_day(row["除权除息日"]), valid_day(row["公告日期"])
+                ex = valid_day(row["除权除息日"])
+                # Old out-of-window rows remain archived raw evidence. Their
+                # inconsistent 1990s dates are not current-period audit issues.
+                if not lo <= ex < cut:
+                    continue
+                ann = valid_day(row["公告日期"])
                 reg = valid_day(row["股权登记日"])
                 gift, reserve, cash = (_number(row[k])/10 for k in ("送股", "转增", "派息"))
                 url = SINA_URL
             elif endpoint == "cninfo_dividend":
-                ex, ann = valid_day(row["除权日"]), valid_day(row["实施方案公告日期"])
+                ex = valid_day(row["除权日"])
+                if not lo <= ex < cut:
+                    continue
+                ann = valid_day(row["实施方案公告日期"])
                 reg = valid_day(row["股权登记日"])
                 gift, reserve, cash = (_number(row[k])/10 for k in ("送股比例", "转增比例", "派息比例"))
                 url = CNINFO_URL
@@ -268,7 +276,7 @@ def _normalize(raw: pd.DataFrame, endpoint: str, *, start: str, cutoff: str
                 raise ValueError("Unsupported normalized endpoint")
             if not (ann <= reg < ex):
                 raise ValueError("Publication/record/ex-date order invalid")
-            if not lo <= ex < cut or gift + reserve + cash == 0:
+            if gift + reserve + cash == 0:
                 continue
             clean.append({"stock_code": code, "ex_date": str(ex.date()),
                           "published_on": str(ann.date()),
