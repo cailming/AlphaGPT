@@ -64,3 +64,5 @@ conda run -n py312 python -m ashare.p4_action_phase3_audit --final
 2026-11-16 20:22 北京时间，BaoStock 登录等待超时。TCP 已建立，独立的 12 秒匿名登录探测在 `login → send_msg` 等待阶段仍超时。故障归入来源会话，影响期间未获取的股票年度任务保留未抓取或待重试状态。早期已达最大尝试次数的日期任务保留终态证据。
 
 在同一个检查点执行 `resume --isolate-circuit` 后，新浪分红、巨潮分红和新浪配股继续落盘。守候进程日志为 `reports/ashare_p4_action_pipeline/phase3-isolated.YxUK77.log`。健康来源处理完成后，恢复程序仅针对已知的 BaoStock 登录超时，每 45 分钟至多试一次匿名登录，最多 8 次。探测成功才恢复该来源。新熔断、P0 和其他来源阻断继续按原规则保留，供诊断。全部收尾条件满足后，自动写入 `reports/ashare_p4_action_pipeline/FINAL_FULL_AUDIT_REPORT.md`。
+
+2026-11-17 09:02 北京时间，BaoStock 待重试任务 `000001 / 2026` 返回 2 行，两行均被冻结时间规则排除。实际查询成功和校验后的空证据已追加至原账本。当另一来源仍有熔断时，可用 `resume --only-source baostock --restore-source baostock` 仅恢复已验证查询成功的 BaoStock。命令使用原写锁，跳过成功任务，并保留其他来源的熔断。续跑中断后的同来源入口为 `resume --only-source baostock`。

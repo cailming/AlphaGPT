@@ -584,6 +584,7 @@ def write_report(evidence, codes, checkpoint):
         "high_priority_exceptions": int(exceptions.priority.isin(["P0", "P1"]).sum()),
         "p0_exceptions": p0, "old_test_isolation_passed": True, "circuit": circuit,
         "paused_sources": paused_sources,
+        "active_source": checkpoint.get("active_source"),
         "scope_ready_for_review": bool(complete_requests + terminal == offered
                                        and not p0 and not circuit and not paused_sources),
         "complete_verified_assertions_created": 0, "can_emit_training_labels": False,
@@ -609,6 +610,17 @@ def write_report(evidence, codes, checkpoint):
     return summary
 
 
+def blocking_circuit(checkpoint, only_source):
+    active = checkpoint.get("circuit")
+    paused = checkpoint.get("paused_sources", {})
+    for circuit in (active, *paused.values()):
+        if circuit and circuit["reason"] == "WRONG_STOCK_CODE":
+            return circuit
+    if only_source is None or (active and active["source"] == only_source):
+        return active
+    return paused.get(only_source)
+
+
 def track_attempt(checkpoint, args, attempt):
     task = attempt.task
     source = SOURCES[task.endpoint]
@@ -622,8 +634,13 @@ def track_attempt(checkpoint, args, attempt):
     failed = sum(status in CIRCUIT_ERRORS for _, status in window)
     if (attempt.category in {"RATE_LIMIT", "SCHEMA_CHANGE", "WRONG_STOCK_CODE"}
             or (len(window) == args.circuit_window and failed / len(window) >= args.error_rate)):
-        checkpoint["circuit"] = {"source": source, "reason": attempt.category, "failed": failed,
-                                 "observed": len(window), "last_task": key}
+        incident = {"source": source, "reason": attempt.category, "failed": failed,
+                    "observed": len(window), "last_task": key}
+        active = checkpoint.get("circuit")
+        if active and active["source"] != source:
+            checkpoint.setdefault("paused_sources", {})[source] = incident
+        else:
+            checkpoint["circuit"] = incident
 
 
 def run(evidence, checkpoint, codes, provider):
@@ -640,13 +657,15 @@ def run(evidence, checkpoint, codes, provider):
 
     def available(task):
         source = SOURCES[task.endpoint]
+        if args.only_source and source != args.only_source:
+            return False
         if source not in checkpoint.get("paused_sources", {}):
             return True
         return task.endpoint == BAO and bao._provider_code(task.stock_code) is None
 
     def collect_batch(tasks):
         for task in tasks:
-            if stop or checkpoint.get("circuit"):
+            if stop or blocking_circuit(checkpoint, args.only_source):
                 break
             state = evidence.state(task)
             while state in {"NOT_FETCHED", "RETRY_PENDING"} and not stop:
@@ -668,7 +687,7 @@ def run(evidence, checkpoint, codes, provider):
                 save()
                 if result != SUCCESS:
                     LOG.warning("%s %s %s: %s", task.stock_code, task.endpoint, task.year or "-", result)
-                if checkpoint.get("circuit"):
+                if blocking_circuit(checkpoint, args.only_source):
                     return
                 state = evidence.state(task)
 
@@ -680,7 +699,7 @@ def run(evidence, checkpoint, codes, provider):
                        if available(task) and evidence.state(task) in {"NOT_FETCHED", "RETRY_PENDING"}]
             if not pending:
                 continue
-            if stop or checkpoint.get("circuit"):
+            if stop or blocking_circuit(checkpoint, args.only_source):
                 break
             preflight_space(args)
             LOG.info("Starting scope positions %s–%s, %s pending requests",
@@ -693,6 +712,7 @@ def run(evidence, checkpoint, codes, provider):
     finally:
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
+    checkpoint.pop("active_source", None)
     summary = write_report(evidence, codes, checkpoint)
     checkpoint["state"] = ("BLOCKED" if checkpoint.get("circuit") else "INTERRUPTED" if stop else
                            "WAITING_FOR_SOURCES" if checkpoint.get("paused_sources") else
@@ -730,6 +750,8 @@ def parse_args():
     parser.add_argument("--circuit-window", type=int)
     parser.add_argument("--error-rate", type=float)
     parser.add_argument("--min-free-mb", type=int)
+    parser.add_argument("--only-source", choices=(BAO,),
+                        help="Resume only the selected source while preserving other circuits")
     recovery = parser.add_mutually_exclusive_group()
     recovery.add_argument("--reset-circuit", action="store_true")
     recovery.add_argument("--isolate-circuit", action="store_true",
@@ -744,6 +766,9 @@ def parse_args():
         parser.error("Invalid scope")
     if (args.isolate_circuit or args.restore_source) and (args.command != "resume" or args.dry_run):
         parser.error("Source isolation and recovery require resume")
+    if args.only_source and (args.command != "resume" or args.dry_run or args.reset_circuit
+                             or args.isolate_circuit or args.restore_source not in (None, args.only_source)):
+        parser.error("A source-scoped run requires resume and a matching source restoration")
     return args
 
 
@@ -815,6 +840,15 @@ def configure(evidence, args):
         paused = checkpoint.get("paused_sources", {})
         if args.restore_source not in paused:
             raise ValueError(f"Source is not paused: {args.restore_source}")
+        if paused[args.restore_source]["reason"] == "WRONG_STOCK_CODE":
+            raise EvidenceError("A security identity mismatch requires P0 investigation")
+        if args.only_source:
+            latest = next((item for item in reversed(journal)
+                           if SOURCES[item.task.endpoint] == args.only_source
+                           and item.category != "UNSUPPORTED_EXCHANGE"), None)
+            if (paused[args.only_source]["reason"] != "TIMEOUT" or latest is None
+                    or latest.category != SUCCESS):
+                raise ValueError("Source-scoped restoration requires a successful query after the timeout")
         del paused[args.restore_source]
         checkpoint["health_window"].pop(args.restore_source, None)
     return codes, checkpoint
@@ -828,24 +862,32 @@ def execute(args):
         return {"offset": checkpoint["offset"], "limit": len(codes),
                 "first_stock": codes[0], "last_stock": codes[-1],
                 "state": checkpoint["state"], "circuit": checkpoint.get("circuit"),
+                "active_source": checkpoint.get("active_source"),
                 "paused_sources": checkpoint.get("paused_sources", {}),
                 "per_endpoint": status.groupby(["endpoint", "state"]).size().unstack(
                     fill_value=0).to_dict(orient="index")}, 0
-    if checkpoint.get("circuit") and args.command in {"run", "resume"}:
+    blocker = blocking_circuit(checkpoint, args.only_source)
+    if blocker and args.command in {"run", "resume"}:
         atomic_json(args.output / "checkpoint.json", checkpoint | {"state": "BLOCKED"})
-    if args.command in {"audit", "report"} or checkpoint.get("circuit"):
-        return write_report(evidence, codes, checkpoint), 2 if checkpoint.get("circuit") else 0
+    if args.command in {"audit", "report"} or blocker:
+        return write_report(evidence, codes, checkpoint), 2 if blocker else 0
+    if (args.output / "p0_blocker.json").exists():
+        raise ValueError("P0 evidence must be resolved before continuing")
     preflight_space(args)
     if not args.controls.is_file():
         raise ValueError(f"Issuer controls missing: {args.controls}")
     (args.output / "attempts").mkdir(exist_ok=True)
     provider = Providers(evidence.meta, args.timeout)
-    atomic_json(args.output / "checkpoint.json", checkpoint | {"state": "RUNNING"})
+    checkpoint.update(state="RUNNING", active_source=args.only_source)
+    atomic_json(args.output / "checkpoint.json", checkpoint)
     try:
-        summary, state = run(evidence, checkpoint | {"state": "RUNNING"}, codes, provider)
+        summary, state = run(evidence, checkpoint, codes, provider)
     finally:
         provider.close()
-    return summary, 0 if state == "DONE" else 2
+    source_complete = args.only_source and not blocking_circuit(checkpoint, args.only_source) and all(
+        evidence.state(Task(code, BAO, year)) in {SUCCESS, "TERMINAL_EXCEPTION"}
+        for code in codes for year in evidence.years)
+    return summary, 0 if state == "DONE" or source_complete else 2
 
 
 def main():

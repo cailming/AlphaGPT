@@ -359,3 +359,61 @@ class PipelineTests(unittest.TestCase):
         with patch.object(recovery, "probe_login") as probe:
             self.assertEqual(recovery.resume_after_login(self.output, 2700, 1), 2)
             probe.assert_not_called()
+
+    def test_baostock_only_restoration_requires_query_and_preserves_cninfo_circuit(self):
+        def schema_change(task):
+            if task.endpoint == "cninfo_dividend":
+                return {"status": "API_ERROR", "error": "schema changed"}, []
+            return self.success(task)
+
+        initial, code = self.first_run(schema_change, limit="1")
+        self.assertEqual(code, 2)
+        path = self.output / "checkpoint.json"
+        checkpoint = p.read_json(path)
+        checkpoint["paused_sources"] = {p.BAO: {"reason": "TIMEOUT"}}
+        p.atomic_json(path, checkpoint)
+        flags = ("--only-source", p.BAO, "--restore-source", p.BAO)
+        with self.assertRaisesRegex(ValueError, "successful query"):
+            self.run_pipeline("resume", self.fail, *flags)
+
+        args = self.args("audit")
+        evidence = p.Evidence(args)
+        _, prepared = p.configure(evidence, args)
+        task = p.Task("000001", p.BAO, 2026)
+        evidence.persist(task, {"stock_code": "000001", "endpoint": p.BAO, "year": 2026,
+                                "status": p.SUCCESS, "response_rows": 0, "error": ""}, [], p.SUCCESS)
+        p.track_attempt(prepared, args, evidence.effective(task))
+        p.atomic_json(path, prepared)
+
+        calls = []
+
+        def bao_only(query):
+            calls.append(query)
+            return self.success(query)
+
+        result, code = self.run_pipeline("resume", bao_only, *flags)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, [p.Task("000001", p.BAO, year) for year in (2024, 2025)])
+        self.assertEqual(result["circuit"], initial["circuit"])
+        self.assertFalse(result["scope_ready_for_review"])
+        self.assertEqual(result["training_gate"], "CLOSED")
+        self.assertIsNone(p.read_json(path).get("active_source"))
+
+    def test_second_circuit_does_not_replace_first_during_scoped_run(self):
+        def cninfo_failure(task):
+            if task.endpoint == "cninfo_dividend":
+                return {"status": "API_ERROR", "error": "schema drift"}, []
+            return self.success(task)
+
+        initial, _ = self.first_run(cninfo_failure, limit="1")
+        calls = []
+
+        def bao_failure(task):
+            calls.append(task)
+            return {"status": "API_ERROR", "error": "HTTP 429 Too Many Requests"}, []
+
+        result, code = self.run_pipeline("resume", bao_failure, "--only-source", p.BAO)
+        self.assertEqual(code, 2)
+        self.assertEqual(calls, [p.Task("000001", p.BAO, 2024)])
+        self.assertEqual(result["circuit"], initial["circuit"])
+        self.assertEqual(result["paused_sources"][p.BAO]["reason"], "RATE_LIMIT")
