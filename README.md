@@ -38,6 +38,11 @@
 
 **Codex 自动执行进度**
 
+- **2026-11-17 14:41 北京时间核验。** `ubuntu92` 上仍只有一个 BaoStock 采集进程，checkpoint 为 `RUNNING`，未发现单独的恢复进程。14:41:10 的累计审计显示已扫描 4,780/5,449 股，其中 887 股全部请求成功，669 股尚未扫描。
+- 全市场 32,694 个任务中，17,303 成功、198 个终态异常、0 个待重试、15,193 个未抓取。BaoStock 已成功 14,338 个，2 个终态异常、2,007 个未抓取；新浪分红和配股均未续跑，巨潮 `002568` 仍保留 `SCHEMA_CHANGE` 熔断。
+- 巨潮 `002568` 独立复检三次，前两次超时，第三次返回 13 行，其中 2 行的除权日在冻结区间内。复检证据独立归档，正式账本和熔断状态未变。
+- 固定 checkpoint 后的只读 `status` 与阶段审计均通过。P0/P1/P2 为 0/224/6,994，旧测试期隔离通过，训练闸门 `CLOSED`。对应累计审计为 `reports/ashare_p4_action_pipeline/audits/audit-f1gdteuh`，阶段报告为 `reports/ashare_p4_action_pipeline/PHASE3_PROGRESS.md`。
+
 - **2026-11-17 09:27 北京时间核验。** 运行代码 `a997b86`，同一个检查点仅启动一个 BaoStock 续跑进程。09:02 的 `000001 / 2026` 实际查询成功，返回两行均在冻结审计区间之外。续跑进程已另有 183 次成功请求证据。
 - 09:27:42 的累计报告显示全范围 3,446 个任务成功、198 个终态异常、0 个待重试、29,050 个未抓取。巨潮 `002568` 的 `SCHEMA_CHANGE` 熔断保留，新浪随前次整体停机，训练闸门为 `CLOSED`。Ubuntu 61 项离线测试通过。
 - BaoStock 续跑日志为 `reports/ashare_p4_action_pipeline/phase3-baostock.ZJGaP7.log`，累计审计仍见 `reports/ashare_p4_action_pipeline/latest_report.json`。
