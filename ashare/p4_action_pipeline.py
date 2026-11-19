@@ -122,6 +122,16 @@ def category(entry):
     return status
 
 
+def check_cninfo_empty_attempt(task, entry, rows):
+    if category(entry) != free.CNINFO_EMPTY_UNVERIFIED:
+        return
+    envelope = entry.get("cninfo_empty_response")
+    if (task.endpoint != "cninfo_dividend" or rows or entry.get("response_rows") != 0
+            or not isinstance(envelope, dict)
+            or not free.cninfo_empty_response(envelope.get("http_status"), envelope)):
+        raise EvidenceError("Missing or invalid CNINFO empty-response evidence")
+
+
 def check_rows(task, rows, meta):
     if not rows:
         return
@@ -254,6 +264,7 @@ class Evidence:
                         or (data["rows"] and data["category"] not in {SUCCESS, "UNKNOWN_EX_DATE"})):
                     raise EvidenceError("Attempt result or raw rows do not match its request")
                 check_rows(task, data["rows"], self.meta)
+                check_cninfo_empty_attempt(task, entry, data["rows"])
                 self.add(Attempt(task, data["entry"], data["rows"], path, data["category"],
                                  number, data["finished"], data["retry_at"]))
             except (ValueError, OSError, KeyError, TypeError) as exc:
@@ -271,6 +282,7 @@ class Evidence:
 
     def persist(self, task, entry, rows, result):
         check_rows(task, rows, self.meta)
+        check_cninfo_empty_attempt(task, entry, rows)
         number = self.new_count(task) + 1
         finished = time.time()
         delay = min(self.args.backoff_cap, self.args.backoff * 2 ** min(number - 1, 30))
@@ -837,20 +849,34 @@ def configure(evidence, args):
         checkpoint.setdefault("paused_sources", {})[circuit["source"]] = circuit
         del checkpoint["circuit"]
     if args.restore_source:
+        source = args.restore_source
         paused = checkpoint.get("paused_sources", {})
-        if args.restore_source not in paused:
+        active_cninfo = (source == "cninfo" and circuit and circuit["source"] == source
+                         and circuit["reason"] == "UPSTREAM_EMPTY_OR_SCHEMA")
+        incident = circuit if active_cninfo else paused.get(source)
+        if incident is None:
             raise ValueError(f"Source is not paused: {args.restore_source}")
-        if paused[args.restore_source]["reason"] == "WRONG_STOCK_CODE":
+        if incident["reason"] == "WRONG_STOCK_CODE":
             raise EvidenceError("A security identity mismatch requires P0 investigation")
+        if source == "cninfo" and incident["reason"] == "UPSTREAM_EMPTY_OR_SCHEMA":
+            task = Task(incident["last_task"].split("/")[0], "cninfo_dividend")
+            latest = evidence.effective(task)
+            if (latest is None or latest.category != free.CNINFO_EMPTY_UNVERIFIED
+                    or not any(0 < item.number < latest.number and item.category == incident["reason"]
+                               for item in evidence.attempts[task])):
+                raise ValueError("CNINFO restoration requires verified empty-response evidence for the triggering task")
         if args.only_source:
             latest = next((item for item in reversed(journal)
                            if SOURCES[item.task.endpoint] == args.only_source
                            and item.category != "UNSUPPORTED_EXCHANGE"), None)
-            if (paused[args.only_source]["reason"] != "TIMEOUT" or latest is None
+            if (incident["reason"] != "TIMEOUT" or latest is None
                     or latest.category != SUCCESS):
                 raise ValueError("Source-scoped restoration requires a successful query after the timeout")
-        del paused[args.restore_source]
-        checkpoint["health_window"].pop(args.restore_source, None)
+        if active_cninfo:
+            del checkpoint["circuit"]
+        else:
+            del paused[source]
+        checkpoint["health_window"].pop(source, None)
     return codes, checkpoint
 
 

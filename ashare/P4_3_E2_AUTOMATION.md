@@ -52,6 +52,8 @@ conda run -n py312 python -m unittest discover -s tests -p 'test_p4_action_*.py'
 
 `resume --isolate-circuit` 保留已诊断的来源熔断，允许其他来源继续。被隔离任务保留未抓取或待重试状态。全量采集会保持未完成，直到能独立验证服务恢复并执行 `resume --restore-source <source>`。股票身份不一致、SHA256 等 P0 先处理完整性问题。
 
+巨潮只有在 HTTP 和业务状态都为 200、`records` 明确为空列表、`count` 与 `total` 都为 0 时才记为 `CNINFO_EMPTY_UNVERIFIED`。该结果是终态覆盖缺口，不计为成功、无分红或熔断错误。超时、限流、未知响应以及非空结果的结构异常沿用原规则。`resume --restore-source cninfo` 恢复 `UPSTREAM_EMPTY_OR_SCHEMA` 熔断时，必须先为触发任务追加通过校验的明确空响应证据，原尝试继续保留。
+
 ```bash
 conda run -n py312 python -m ashare.p4_action_phase3_audit
 conda run -n py312 python -m ashare.p4_action_phase3_audit --final

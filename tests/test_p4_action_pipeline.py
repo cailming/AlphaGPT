@@ -7,12 +7,20 @@ from pathlib import Path
 import shutil
 import signal
 import tempfile
+from types import FunctionType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 import pandas as pd
 
 from ashare import p4_action_pipeline as p
+from ashare import p4_action_phase3_audit as audit
+
+
+def _vendor_cninfo(symbol):
+    response = http.post(p.free.CNINFO_DIVIDEND_URL, params={"scode": symbol})
+    frame = pd.DataFrame(response.json()["records"])
+    return frame.loc[:, list(p.free.CNINFO_COLS)] if not frame.empty else frame["实施方案公告日期"]
 
 
 class PipelineTests(unittest.TestCase):
@@ -108,6 +116,92 @@ class PipelineTests(unittest.TestCase):
         self.assertFalse(summary["full_historical_action_coverage_certified"])
         self.assertFalse(summary["can_emit_training_labels"])
         self.assertEqual(self.run_pipeline("resume", self.fail)[1], 0)
+
+    def test_cninfo_contract_distinguishes_empty_from_http_or_schema_failure(self):
+        payload = {"resultcode": 200, "count": 0, "total": 0, "records": []}
+        for status_code, body, expected in [
+            (200, payload, p.free.CNINFO_EMPTY_UNVERIFIED),
+            (200, payload | {"resultcode": 500}, "UPSTREAM_EMPTY_OR_SCHEMA"),
+            (200, payload | {"total": 1}, "UPSTREAM_EMPTY_OR_SCHEMA"),
+            (200, payload | {"count": False}, "UPSTREAM_EMPTY_OR_SCHEMA"),
+            (200, payload | {"records": None}, "UPSTREAM_EMPTY_OR_SCHEMA"),
+            (200, payload | {"records": [{"实施方案公告日期": "2025-05-01"}]}, "SCHEMA_CHANGE"),
+            (429, payload, "RATE_LIMIT"),
+        ]:
+            with self.subTest(status_code=status_code, body=body):
+                def raise_for_status():
+                    if status_code != 200:
+                        raise RuntimeError(f"HTTP {status_code}")
+
+                response = SimpleNamespace(status_code=status_code, raise_for_status=raise_for_status,
+                                           json=lambda: body)
+                transport = SimpleNamespace(post=lambda *args, **kwargs: response)
+                method = FunctionType(_vendor_cninfo.__code__, {**globals(), "http": transport})
+                entry, rows = p.free.fetch_request(SimpleNamespace(stock_dividend_cninfo=method),
+                                                   "000001", "cninfo_dividend", cutoff=p.CUTOFF,
+                                                   row_cap=1000, audit_start="2024-12-01")
+                self.assertEqual(p.category(entry), expected)
+                self.assertTrue(rows.empty)
+                if expected == p.free.CNINFO_EMPTY_UNVERIFIED:
+                    self.assertEqual(entry["cninfo_empty_response"], payload | {"http_status": 200})
+                else:
+                    self.assertNotIn("cninfo_empty_response", entry)
+                self.assertIs(method.__globals__["http"], transport)
+
+    @staticmethod
+    def cninfo_empty(task):
+        return {"status": p.free.CNINFO_EMPTY_UNVERIFIED, "response_rows": 0,
+                "stock_code": task.stock_code, "endpoint": task.endpoint, "year": task.year,
+                "cninfo_empty_response": {"http_status": 200, "resultcode": 200, "count": 0,
+                                          "total": 0, "records": []}}, []
+
+    def test_cninfo_valid_empty_is_terminal_unknown_and_does_not_trip_circuit(self):
+        calls = []
+
+        def provider(task):
+            calls.append(task)
+            return self.cninfo_empty(task) if task.endpoint == "cninfo_dividend" else self.success(task)
+
+        summary, code = self.first_run(provider, "--circuit-window", "2")
+        self.assertEqual(code, 0)
+        self.assertIsNone(summary["circuit"])
+        self.assertEqual(summary["terminal_exceptions"], 2)
+        self.assertEqual(summary["effective_successes"], 10)
+        self.assertEqual(len(calls), len(set(calls)))
+        self.assertEqual(summary["training_gate"], "CLOSED")
+        self.assertEqual(audit.classify(p.free.CNINFO_EMPTY_UNVERIFIED)[::2], ("source_response", False))
+
+    def test_cninfo_restoration_requires_verified_evidence_on_triggering_task(self):
+        def ambiguous(task):
+            if task.endpoint == "cninfo_dividend":
+                return {"status": "UPSTREAM_EMPTY_OR_SCHEMA"}, []
+            return self.success(task)
+
+        summary, code = self.first_run(ambiguous, "--circuit-window", "2", "--max-attempts", "1")
+        self.assertEqual(code, 2)
+        self.assertEqual(summary["circuit"]["last_task"], "000002/cninfo_dividend/0")
+        with self.assertRaisesRegex(ValueError, "verified empty-response evidence"):
+            self.run_pipeline("resume", self.fail, "--restore-source", "cninfo")
+
+        args = self.args("status")
+        evidence = p.Evidence(args)
+        p.configure(evidence, args)
+        task = p.Task("000002", "cninfo_dividend")
+        entry, rows = self.cninfo_empty(task)
+        with self.assertRaisesRegex(p.EvidenceError, "empty-response evidence"):
+            evidence.persist(task, entry | {"cninfo_empty_response": {}}, rows, entry["status"])
+        evidence.persist(task, entry, rows, entry["status"])
+
+        def verify_remaining(task):
+            self.assertNotEqual(task.endpoint, "cninfo_dividend")
+            return self.success(task)
+
+        summary, code = self.run_pipeline("resume", verify_remaining, "--restore-source", "cninfo")
+        self.assertEqual(code, 0)
+        self.assertIsNone(summary["circuit"])
+        self.assertEqual(summary["terminal_exceptions"], 2)
+        historic = p.read_json(self.output / "attempts" / p.Evidence.filename(task, 1))
+        self.assertEqual(historic["attempt"]["category"], "UPSTREAM_EMPTY_OR_SCHEMA")
 
     def test_circuit_persists_and_blocks_resume(self):
         def rate_limit(_):

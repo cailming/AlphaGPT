@@ -94,7 +94,7 @@ def classify(category):
         return "evidence_integrity", "Inspect the immutable ledger and raw rows for identity or duplicate keys", False
     if category in SOURCE_PROBLEMS:
         return "source_response", "Check endpoint health and authenticated response metadata", False
-    if category == "SUCCESS_EMPTY_RESPONSE":
+    if category in {"SUCCESS_EMPTY_RESPONSE", pipeline.free.CNINFO_EMPTY_UNVERIFIED}:
         return "source_response", "Seek corroborating dated events; historical coverage remains unknown", False
     if category == "UNKNOWN_EX_DATE" or "DATE" in category or "date" in category.lower():
         return "event_date", "Obtain the dated issuer implementation notice with record and ex dates", True

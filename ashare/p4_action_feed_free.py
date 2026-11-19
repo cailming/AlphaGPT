@@ -13,12 +13,15 @@ import json
 from pathlib import Path
 import re
 import time
+from types import FunctionType
 
 import numpy as np
 import pandas as pd
 
 SINA_URL = "https://vip.stock.finance.sina.com.cn/corp/go.php/vISSUE_ShareBonus/"
 CNINFO_URL = "http://webapi.cninfo.com.cn/"
+CNINFO_DIVIDEND_URL = "https://webapi.cninfo.com.cn/api/sysapi/p_sysapi1139"
+CNINFO_EMPTY_UNVERIFIED = "CNINFO_EMPTY_UNVERIFIED"
 ENDPOINTS = ("sina_dividend", "cninfo_dividend", "sina_rights")
 SINA_COLS = ("公告日期", "送股", "转增", "派息", "进度", "除权除息日", "股权登记日")
 CNINFO_COLS = ("实施方案公告日期", "送股比例", "转增比例", "派息比例", "除权日", "股权登记日")
@@ -116,7 +119,54 @@ def _import_akshare():
     return ak
 
 
-def _endpoint(provider, code: str, endpoint: str) -> pd.DataFrame:
+def cninfo_empty_response(http_status, payload):
+    return (http_status == 200 and isinstance(payload, dict)
+            and type(payload.get("resultcode")) is int and payload["resultcode"] == 200
+            and all(type(payload.get(name)) is int and payload[name] == 0 for name in ("count", "total"))
+            and isinstance(payload.get("records"), list) and not payload["records"])
+
+
+class _CninfoEmptyResponse(Exception):
+    pass
+
+
+class _CninfoTransport:
+    def __init__(self, transport):
+        self.transport = transport
+
+    def __getattr__(self, name):
+        return getattr(self.transport, name)
+
+    def post(self, url, *args, **kwargs):
+        response = self.transport.post(url, *args, **kwargs)
+        if url != CNINFO_DIVIDEND_URL:
+            return response
+        response.raise_for_status()
+        try:
+            envelope = response.json()
+        except ValueError:
+            return response
+        if cninfo_empty_response(response.status_code, envelope):
+            fields = {name: envelope[name] for name in ("resultcode", "count", "total", "records")}
+            raise _CninfoEmptyResponse({"http_status": response.status_code, **fields})
+        return response
+
+
+def _cninfo_call(method, code):
+    if isinstance(method, FunctionType):
+        namespace = method.__globals__
+        transport_name = next((name for name in ("http", "requests")
+                               if name in method.__code__.co_names
+                               and callable(getattr(namespace.get(name), "post", None))), None)
+        if transport_name is not None:
+            call = FunctionType(method.__code__, {**namespace, transport_name: _CninfoTransport(namespace[transport_name])},
+                                method.__name__, method.__defaults__, method.__closure__)
+            call.__kwdefaults__ = method.__kwdefaults__
+            return call(symbol=code)
+    return method(symbol=code)
+
+
+def _endpoint(provider, code: str, endpoint: str, *, verify_cninfo_empty=False) -> pd.DataFrame:
     if endpoint == "sina_dividend":
         return provider.stock_history_dividend_detail(symbol=code, indicator="分红")
     if endpoint == "sina_rights":
@@ -129,7 +179,7 @@ def _endpoint(provider, code: str, endpoint: str) -> pd.DataFrame:
             method = getattr(provider, "stock_dividents_cninfo", None)
         if method is None:
             raise AttributeError("AkShare lacks stock_dividend_cninfo; upgrade akshare")
-        return method(symbol=code)
+        return _cninfo_call(method, code) if verify_cninfo_empty else method(symbol=code)
     raise ValueError(f"Unsupported endpoint: {endpoint}")
 
 
@@ -178,10 +228,11 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
                   audit_start: str | None = None) -> tuple[dict, pd.DataFrame]:
     kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
     status, error, rows, dropped = "SUCCESS", "", 0, 0
+    empty_response = None
     diagnostics = {f"{problem}_{date}_date_rows": 0
                    for problem in ("missing", "invalid") for date in ("ex", "announcement")}
     try:
-        frame = _endpoint(ak, code, endpoint)
+        frame = _endpoint(ak, code, endpoint, verify_cninfo_empty=audit_start is not None)
         if not isinstance(frame, pd.DataFrame):
             raise ValueError("API result is not DataFrame")
         rows = len(frame)
@@ -213,6 +264,10 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
                 if any(diagnostics.values()):
                     status = "UNKNOWN_EX_DATE"
                     error = "Provider rows have unknown ex or announcement dates"
+    except _CninfoEmptyResponse as exc:
+        status = CNINFO_EMPTY_UNVERIFIED
+        error = "CNINFO reported zero records; historical coverage is unknown"
+        empty_response = exc.args[0]
     except Exception as exc:
         if (endpoint == "cninfo_dividend" and isinstance(exc, KeyError)
                 and "实施方案公告日期" in str(exc)):
@@ -226,6 +281,8 @@ def fetch_request(ak, code: str, endpoint: str, *, cutoff: str, row_cap: int,
             kept = pd.DataFrame(columns=("request_code",) + _cols(endpoint))
     entry = {"stock_code": code, "endpoint": endpoint, "status": status,
              "response_rows": rows, "dropped_future_or_invalid": dropped, "error": error}
+    if empty_response is not None:
+        entry["cninfo_empty_response"] = empty_response
     if audit_start is not None and status in {"SUCCESS", "UNKNOWN_EX_DATE"}:
         entry.update(diagnostics)
     return entry, kept
