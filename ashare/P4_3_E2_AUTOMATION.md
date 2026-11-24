@@ -63,6 +63,8 @@ conda run -n py312 python -m ashare.p4_action_phase3_audit --final
 
 最终审计后的首批 P1 日期和条款冲突可用 `conda run -n py312 python -m ashare.p4_action_conflict_triage --reviewed-notices ashare/data/p4_action_conflict_notice_observations.json` 分流。程序读取校验后的原账本，按股票和除权日合并同一核验事项，在 `reports/ashare_p4_action_pipeline/followup/` 下保存证据和剩余公告队列。精度相容只用于降低复核优先级；同日多笔、差异化分红、实际派息与除息参考口径须查发行人公告。公告观察与正式覆盖认证和训练数据隔离。
 
+北交所现金字段缺报的待核队列使用 `ashare.p4_action_bse_notices --triage <分流目录> --out <新归档目录>` 获取发行人实施公告，再用 `ashare.p4_action_bse_notice_verify --archive <归档目录> --out <新核验目录>` 离线核对。旧证券代码须由同一公告索引组织编号和 PDF 抬头对应；登记日、除权日、税前现金及适用的送转字段都须匹配。公告索引、PDF、文本及结果保留 SHA256。核对以公告的实际分派方案为准，扣税和除息参考值不代替实际派发。搜索拒绝、限流或未验证的证据保留未决，不影响原账本和训练闸门。
+
 ### BaoStock 登录超时及隔离续跑
 
 2026-11-16 20:22 北京时间，BaoStock 登录等待超时。TCP 已建立，独立的 12 秒匿名登录探测在 `login → send_msg` 等待阶段仍超时。故障归入来源会话，影响期间未获取的股票年度任务保留未抓取或待重试状态。早期已达最大尝试次数的日期任务保留终态证据。
