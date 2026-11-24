@@ -16,7 +16,7 @@ from torch import nn
 
 from .p4_action_pipeline import atomic_json, read_json
 from .p4_subset_dataset import GUARD, TRUSTED, time_split
-from .p4_subset_inputs import hash_file, parquet_read
+from .p4_subset_inputs import hash_file, parquet_read, parquet_write
 from .p4_subset_model import FEATURES, dataset_summary, metrics
 
 VERSION = "P4.4_TRANSFORMER_V1"
@@ -80,11 +80,13 @@ def scale_sequences(matrix, indices, mean, scale):
 
 
 class FrozenData:
-    def __init__(self, root):
+    def __init__(self, root, *, audit_reader=dataset_summary):
         self.root = root
         self.dataset = root / "dataset"
         preflight = root / "transformer/transformer_preflight.json"
-        self.audit = dataset_summary(self.dataset)
+        self.audit = audit_reader(self.dataset)
+        self.end_exclusive = (self.audit["research_end_exclusive"] if "research_end_exclusive" in self.audit
+                              else self.audit["old_test_excluded"])
         self.record = read_json(preflight)
         self.audit_sha256 = hash_file(self.dataset / "subset_audit.json")
         self.preflight_sha256 = hash_file(preflight)
@@ -142,7 +144,7 @@ class FrozenData:
                 or not np.array_equal(anchor, rows.trade_date.to_numpy())
                 or not rows.sample_grade.eq(TRUSTED).all() or not rows.sequence_feature_evidence_ready.all()
                 or not (rows.trade_date.lt(rows.entry_date) & rows.entry_date.lt(rows.exit_date)
-                        & rows.exit_date.le(self.audit["price_end"]) & rows.exit_date.lt(self.audit["old_test_excluded"])).all()
+                        & rows.exit_date.le(self.audit["price_end"]) & rows.exit_date.lt(self.end_exclusive)).all()
                 or any(time_split(r.trade_date, r.exit_date, self.audit["val_start"], self.audit["test_start"]) != name
                        for r in rows.itertuples(index=False))):
             raise ValueError(f"Frozen {name} sequence keys, qualification, or timing invalid")
@@ -175,11 +177,11 @@ def atomic_torch(path, obj):
             temporary.unlink(missing_ok=True)
 
 
-def load_model(folder, device):
+def load_model(folder, device, *, version=VERSION):
     info = read_json(folder / "model_metadata.json")
     weights = folder / "best_model.pt"
     verify_digest(weights, info["weights_sha256"])
-    if (info["version"] != VERSION or tuple(info["feature_names"]) != FEATURES
+    if (info["version"] != version or tuple(info["feature_names"]) != FEATURES
             or any(info[key] != value for key, value in GUARD.items())
             or any(info["architecture"][name] != value for name, value in ARCHITECTURE.items())):
         raise ValueError("Model contract is incompatible")
@@ -219,22 +221,30 @@ def train(source, output, requested, resume):
         _fit(FrozenData(source), output, precision_for(requested), resume)
 
 
-def _fit(data, output, precision, resume):
+def _fit(data, output, precision, resume, *, version=VERSION, plan=EVALUATION_PLAN, label_transform=None,
+         experiment_metadata=None):
     device = torch.device("cuda:0")
     cfg = data.config
-    identity = {"version": VERSION, "audit_sha256": data.audit_sha256, "preflight_sha256": data.preflight_sha256,
+    identity = {"version": version, "audit_sha256": data.audit_sha256, "preflight_sha256": data.preflight_sha256,
                 "configuration": cfg, "precision": precision, "torch": str(torch.__version__),
-                "gpu": torch.cuda.get_device_name(device), "evaluation_plan": EVALUATION_PLAN}
+                "gpu": torch.cuda.get_device_name(device), "evaluation_plan": plan}
+    if experiment_metadata is not None:
+        identity["experiment"] = experiment_metadata
     if (output / "model_metadata.json").exists():
         raise ValueError("Training already completed; its selected model is frozen")
     policy_file = output / "evaluation_plan.json"
     if resume:
-        if read_json(policy_file) != EVALUATION_PLAN:
+        if read_json(policy_file) != plan:
             raise ValueError("Evaluation plan changed since training started")
     else:
-        atomic_json(policy_file, EVALUATION_PLAN)
+        atomic_json(policy_file, plan)
     rows_train, x, y = data.fold("train")
     rows_val, vx, vy = data.fold("validation")
+    validation_labels = rows_val
+    if label_transform is not None:
+        y = label_transform(rows_train)
+        vy = label_transform(rows_val)
+        validation_labels = rows_val.assign(target_return=vy)
     validation_x = torch.as_tensor(vx, device=device)
     x = torch.as_tensor(x, device=device)
     y = torch.as_tensor(y, device=device)
@@ -278,7 +288,7 @@ def _fit(data, output, precision, resume):
                 print(f"epoch {epoch}/{total}, batch {step}/{len(order.split(batch))}, "
                       f"train_loss={loss_sum.item()/min(step*batch,len(x)):.7f}", flush=True)
         scores = predict(model, validation_x, device, batch)
-        val = metrics(rows_val, scores)
+        val = metrics(validation_labels, scores)
         if val["mean_daily_rank_ic"] is None or not torch.isfinite(loss_sum).item():
             raise ValueError("Training loss or validation Rank IC is invalid")
         absolute = np.abs(scores - vy)
@@ -307,13 +317,14 @@ def _fit(data, output, precision, resume):
         raise RuntimeError("Restored Transformer does not reproduce validation scores")
     support = {str(code): int(count) for code, count in rows_train.stock_code.value_counts().items()}
     report = {
-        "version": VERSION, **GUARD, "research_only": True, "dataset_version": data.audit["version"],
+        "version": version, **GUARD, "research_only": True, "dataset_version": data.audit["version"],
         "training_identity": identity, "feature_names": list(FEATURES), "architecture": cfg,
         "mean": data.mean.tolist(), "scale": data.scale.tolist(), "dataset_audit_sha256": data.audit_sha256,
         "weights_sha256": hash_file(weights), "evaluation_plan_sha256": hash_file(policy_file),
         "train_first_signal": str(rows_train.trade_date.min()), "train_last_signal": str(rows_train.trade_date.max()),
         "train_last_exit": str(rows_train.exit_date.max()), "selection_last_exit": str(rows_val.exit_date.max()),
-        "old_test_excluded": data.audit["old_test_excluded"], "test_start": data.audit["test_start"],
+        "old_test_excluded": (data.audit["v1_old_test_excluded"] if experiment_metadata is not None
+                              else data.audit["old_test_excluded"]), "test_start": data.audit["test_start"],
         "holdout_kind": data.audit["test_kind"], "pool_config": data.audit["pool"]["pool_config"],
         "frozen_at_utc": datetime.now(timezone.utc).isoformat(), "train_stock_counts": support,
         "train_mean_return": float(rows_train.target_return.mean()), "training_rows": len(rows_train),
@@ -322,6 +333,12 @@ def _fit(data, output, precision, resume):
         "reload_predictions_match_exactly": True, "reload_predictions_checked": len(before),
         "model_training_accessed_test_labels": False,
     }
+    if experiment_metadata is not None:
+        validation_path = output / "validation_predictions.parquet"
+        parquet_write(rows_val[["stock_code", "trade_date", "target_return"]].assign(score=after), validation_path)
+        report.update(experiment_metadata, validation_predictions_sha256=hash_file(validation_path),
+                      validation_first_signal=str(rows_val.trade_date.min()),
+                      validation_last_signal=str(rows_val.trade_date.max()))
     atomic_json(output / "model_metadata.json", report)
     print(f"FROZEN best epoch {best_epoch}, validation IC {best_ic:.6f}, reload={len(before)}", flush=True)
 
