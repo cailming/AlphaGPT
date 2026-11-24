@@ -61,6 +61,8 @@ conda run -n py312 python -m ashare.p4_action_phase3_audit --final
 
 进度报告复算截至最近一份累计审计的任务、股票、空表和优先级。异常画像分开计量请求、来源记录和权益字段，并产出发行人公告核验及来源排查队列。最终报告要求全量检查点完成、无在途问题且训练闸门关闭。
 
+最终审计后的首批 P1 日期和条款冲突可用 `conda run -n py312 python -m ashare.p4_action_conflict_triage --reviewed-notices ashare/data/p4_action_conflict_notice_observations.json` 分流。程序读取校验后的原账本，按股票和除权日合并同一核验事项，在 `reports/ashare_p4_action_pipeline/followup/` 下保存证据和剩余公告队列。精度相容只用于降低复核优先级；同日多笔、差异化分红、实际派息与除息参考口径须查发行人公告。公告观察与正式覆盖认证和训练数据隔离。
+
 ### BaoStock 登录超时及隔离续跑
 
 2026-11-16 20:22 北京时间，BaoStock 登录等待超时。TCP 已建立，独立的 12 秒匿名登录探测在 `login → send_msg` 等待阶段仍超时。故障归入来源会话，影响期间未获取的股票年度任务保留未抓取或待重试状态。早期已达最大尝试次数的日期任务保留终态证据。
