@@ -55,8 +55,11 @@ def model_capture(record, track, lane, spec, source):
     if kind != ("EQUAL_WEIGHT" if lane == "equal_weight" else "RANKED"):
         raise ValueError(f"Unexpected portfolio kind for {lane}: {kind}")
     status = "ABSTAINED" if record["status"] == "SCORED" and counts[0] == 0 else record["status"]
+    freeze = timestamp(spec["model_frozen_at"])
+    if "policy_frozen_at" in record:
+        freeze = max(freeze, timestamp(record["policy_frozen_at"]))
     return {"day": record["trade_date"], "track": track, "lane": lane, "version": spec["model_version"],
-            "model_sha256": spec["weights_sha256"], "freeze_day": timestamp(spec["model_frozen_at"]).date().isoformat(),
+            "model_sha256": spec["weights_sha256"], "freeze_day": freeze.date().isoformat(),
             "status": status, "formal": bool(record["formal_session"]), "portfolio_kind": kind,
             "captured": True, "candidates": counts[2], "abstentions": counts[1],
             "abstention_reasons": spec["abstention_reasons"], "source": str(source)}

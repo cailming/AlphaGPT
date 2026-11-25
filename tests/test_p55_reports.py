@@ -14,8 +14,8 @@ import pandas as pd
 from ashare.p4_action_pipeline import read_json
 from ashare.p4_subset_inputs import hash_file
 from ashare.p55_reports import (CUMULATIVE_REPORT, DAILY_REPORT, LANES, PANEL_LANES, REPORT_AUDIT,
-                                daily_markdown, disjoint_holds, evaluate_days, hac_mean,
-                                ranked_daily, read_panel, run, summarize)
+                                captures_with_gaps, daily_markdown, disjoint_holds, evaluate_days, hac_mean,
+                                model_capture, ranked_daily, read_panel, run, summarize)
 
 
 CALENDAR = [d.date().isoformat() for d in pd.bdate_range("2026-08-03", periods=32)]
@@ -42,6 +42,15 @@ def capture(lane, day=CALENDAR[1], track="PROSPECTIVE", forecast_count=25, candi
 
 
 class ReportsTests(unittest.TestCase):
+    def test_panel_prospective_start_uses_later_policy_freeze(self):
+        record = {"status": "SCORED", "formal_session": True, "trade_date": "2026-11-25",
+                  "policy_frozen_at": "2026-11-25T15:00:00+08:00"}
+        arm = {"rows": 1, "abstentions": 0, "abstention_reasons": {}, "model_version": "v",
+               "weights_sha256": "weights", "model_frozen_at": "2026-11-24T19:00:00+08:00"}
+        result = model_capture(record, "TIMELY_NONPROSPECTIVE", "factors18", arm, Path("manifest.json"))
+        self.assertEqual(result["freeze_day"], "2026-11-25")
+        self.assertEqual(captures_with_gaps([result], ["2026-11-24", "2026-11-25"]), [result])
+
     def test_common_matches_frozen_forecasts_before_any_label_result(self):
         reads = [forecasts(lane, 24 if lane == "factors18" else 25, missing=(23,)) for lane in LANES]
         frames = pd.concat(reads, ignore_index=True)
