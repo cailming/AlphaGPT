@@ -85,6 +85,7 @@ class FrozenData:
         self.dataset = root / "dataset"
         preflight = root / "transformer/transformer_preflight.json"
         self.audit = audit_reader(self.dataset)
+        self.feature_names = tuple(self.audit["feature_names"])
         self.end_exclusive = (self.audit["research_end_exclusive"] if "research_end_exclusive" in self.audit
                               else self.audit["old_test_excluded"])
         self.record = read_json(preflight)
@@ -103,16 +104,16 @@ class FrozenData:
         verify_digest(scaler_file, self.record["scaler"]["sha256"])
         with np.load(scaler_file, allow_pickle=False) as artifact:
             self.mean, self.scale = artifact["mean"], artifact["scale"]
-            if (tuple(artifact["feature_names"]) != FEATURES or self.mean.shape != (len(FEATURES),)
+            if (tuple(artifact["feature_names"]) != self.feature_names or self.mean.shape != (len(self.feature_names),)
                     or self.scale.shape != self.mean.shape or not np.isfinite(self.mean).all()
                     or not np.isfinite(self.scale).all() or (self.scale <= 0).any()):
                 raise ValueError("Invalid frozen training scaler")
-        self.config = config | {"sequence_length": self.record["sequence_length"], "feature_count": len(FEATURES)}
+        self.config = config | {"sequence_length": self.record["sequence_length"], "feature_count": len(self.feature_names)}
         self.features = parquet_read(self.dataset / "causal_inference_features.parquet")
         if (self.features.duplicated(["stock_code", "session_id"]).any()
                 or {"target_return", "split", "exit_date", "sample_grade"} & set(self.features.columns)):
             raise ValueError("Expected unique feature-only candidate rows")
-        self.matrix = self.features[list(FEATURES)].to_numpy(dtype=float)
+        self.matrix = self.features[list(self.feature_names)].to_numpy(dtype=float)
 
     def fold(self, name):
         import polars as pl
@@ -177,11 +178,12 @@ def atomic_torch(path, obj):
             temporary.unlink(missing_ok=True)
 
 
-def load_model(folder, device, *, version=VERSION):
+def load_model(folder, device, *, version=VERSION, feature_names=FEATURES):
     info = read_json(folder / "model_metadata.json")
     weights = folder / "best_model.pt"
     verify_digest(weights, info["weights_sha256"])
-    if (info["version"] != version or tuple(info["feature_names"]) != FEATURES
+    if (info["version"] != version or tuple(info["feature_names"]) != tuple(feature_names)
+            or info["architecture"]["feature_count"] != len(feature_names)
             or any(info[key] != value for key, value in GUARD.items())
             or any(info["architecture"][name] != value for name, value in ARCHITECTURE.items())):
         raise ValueError("Model contract is incompatible")
@@ -318,7 +320,7 @@ def _fit(data, output, precision, resume, *, version=VERSION, plan=EVALUATION_PL
     support = {str(code): int(count) for code, count in rows_train.stock_code.value_counts().items()}
     report = {
         "version": version, **GUARD, "research_only": True, "dataset_version": data.audit["version"],
-        "training_identity": identity, "feature_names": list(FEATURES), "architecture": cfg,
+        "training_identity": identity, "feature_names": list(data.audit.get("feature_names", FEATURES)), "architecture": cfg,
         "mean": data.mean.tolist(), "scale": data.scale.tolist(), "dataset_audit_sha256": data.audit_sha256,
         "weights_sha256": hash_file(weights), "evaluation_plan_sha256": hash_file(policy_file),
         "train_first_signal": str(rows_train.trade_date.min()), "train_last_signal": str(rows_train.trade_date.max()),
