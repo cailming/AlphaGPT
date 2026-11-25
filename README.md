@@ -24,6 +24,24 @@
 
 ## AlphaGPT-Ashare 开发进度
 
+<!-- p5-forward-follow:start -->
+### P5.5-B/C、P5.6、P5.7 后续研究看板
+
+**2026-11-25 14:54:59 北京时间。** 六方法账本实现提交 [`54a0e4e`](https://github.com/cailming/AlphaGPT/commit/54a0e4e243d71dbc62591073cb0deeb954f17bae)。本轮服务器目录为 `/home/gc/gcdev/alphagpt/AlphaGPT/reports/ashare_p5_follow/pfollow.yFSC8U`。
+
+| 阶段 | 进度 | ubuntu92 实测 | 后续 |
+|---|---|---|---|
+| P5.5-B 多方法预测 | 工程通过，已接入现有夜间任务 | 新建 18 因子、MA20、等权独立账本，原 V2 三套冻结记录继续使用 | 按各自冻结日期积累前瞻 |
+| P5.5-C 日报与评价 | 工程通过，前瞻数据待成熟 | 六方法日报与累计 CSV 已读回，14 项专项测试全过 | 观察至少 20 个达标前瞻交易日和 80% 标签覆盖 |
+| P5.6 市场因子消融 | 运行中 | 六组使用同一冻结配对数据 | 按验证期选择轮次，完成历史诊断 |
+| P5.7 主力资金 | 待运行 | 因子消融完成后审计现有生产表的历史可见性 | 资格不足时保留拒绝 |
+
+- 新增账本政策于 2026-11-25 14:51 北京时间冻结。旧 crontab 前后逐字节一致，复用原夜间入口，盘前探测按规则延后运行。原预测日清单及其散列是新增账本的依赖。
+- 历史补跑里，9 月 23 日和 24 日，六种方法分别覆盖同一批 120／119 只。11 月 23 日，三个原模型及两个基准各有 115 只，18 因子因历史市场环境特征不完整而弃权。报告共读回 2,714 条记录，1,368 条成熟，66 条保留为未核实经济行为，1,280 条待成熟。这些历史及冻结同日记录不计入前瞻。
+- 日报和累计 CSV 在 `p55_report_verified`，持续运行的新增记录在 `panel`。六方法报告分别计算独立与共同股票覆盖，并给出实际 Rank IC 日期、完整 Top-20 日期、训练支持度分组和日期间隔 HAC 估计。前瞻门槛只触发人工评审。[六方法运行说明](ashare/P55_MULTI_MODEL.md)
+
+<!-- p5-forward-follow:end -->
+
 ### P5.3-D/E、P5.4、P5.5 稳定研究与前瞻看板
 
 **截至 2026-11-25 13:00:23 北京时间。** 代码、测试和运行说明已纳入提交 [`1f17d59`](https://github.com/cailming/AlphaGPT/commit/1f17d596e894cfce7f6869257a30b4677c89a85c)。稳定池及数据位于 `/home/gc/gcdev/alphagpt/AlphaGPT/reports/ashare_p5/p53.GUQopy`，模型对照和每日账本位于 `/home/gc/gcdev/alphagpt/AlphaGPT/reports/ashare_p5_next/pnext.bT5Erw`。
