@@ -85,6 +85,21 @@ else
     else
         record portfolio AWAITING_POLICY_OR_FINAL_FORMAL_PROBE
     fi
+    # This incident-specific counterfactual has its own archive and an end date.
+    # Run it after all frozen jobs, using the manifests they actually archived today.
+    patch_root=$root/p65/quote-patch-daily
+    if [[ -d $patch_root && $today > 2026-11-26 && $today < 2026-12-08 ]]; then
+        if [[ $p55_ready == true ]]; then
+            step quote_patch_diagnostic ashare.p65_enhanced_audit --scheduled-day "$today" \
+                --legacy "$legacy" --panel "$panel" --source "$previous/paired18" \
+                --full18 "$previous/stable_models/factors18" --group-model "$follow/ablation/models/group_c" \
+                --group-ledger "$root/group_c" --out "$patch_root/runs/$today" \
+                --research-patch-manifest "$patch_root/input/market_audit.json" \
+                --research-patch-manifest-sha256 f23533d0eaf663cf8fe8fce19ec9149fb9c440dd517ae34ae9e966a3d7be970a
+        else
+            record quote_patch_diagnostic AWAITING_TODAY_ARCHIVED_P55_MANIFESTS
+        fi
+    fi
 fi
 record "$phase" "EXIT=$result"
 exit "$result"

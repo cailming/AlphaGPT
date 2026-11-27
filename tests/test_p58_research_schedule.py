@@ -9,7 +9,7 @@ import unittest
 
 @unittest.skipUnless(shutil.which("flock"), "Ubuntu schedule uses flock")
 class SchedulerTests(unittest.TestCase):
-    def execute(self, hour, minute, current_panel=False):
+    def execute(self, hour, minute, current_panel=False, patch_enabled=False):
         source = Path(__file__).resolve().parents[1]
         script = next(p for p in (source/"ashare/p58_research_schedule.sh", source/"code/p58_research_schedule.sh")
                       if p.exists())
@@ -17,6 +17,8 @@ class SchedulerTests(unittest.TestCase):
             folder = Path(directory)
             root = folder/"reports/p58/run"
             root.mkdir(parents=True)
+            if patch_enabled:
+                (root/"p65/quote-patch-daily").mkdir(parents=True)
             for lane in ("portfolio","group_c"):
                 (root/lane).mkdir()
                 (root/lane/"policy.json").touch()
@@ -55,6 +57,13 @@ class SchedulerTests(unittest.TestCase):
         _, calls = self.execute("18","10",current_panel=True)
         self.assertIn("ashare.p58_group_c capture", calls)
         self.assertIn("ashare.p6_portfolio_run run", calls)
+
+    def test_quote_patch_runs_last_and_requires_todays_frozen_manifests(self):
+        _, calls = self.execute("18", "10", current_panel=True, patch_enabled=True)
+        self.assertIn("ashare.p65_enhanced_audit --scheduled-day 2026-11-27", calls.splitlines()[-1])
+        self.assertIn("/quote-patch-daily/runs/2026-11-27", calls.splitlines()[-1])
+        _, missing_parents = self.execute("18", "10", patch_enabled=True)
+        self.assertNotIn("ashare.p65_enhanced_audit", missing_parents)
 
 
 if __name__ == "__main__":
