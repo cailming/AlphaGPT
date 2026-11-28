@@ -100,6 +100,17 @@ else
             record quote_patch_diagnostic AWAITING_TODAY_ARCHIVED_P55_MANIFESTS
         fi
     fi
+    if [[ -f $root/p66/schedule.enabled ]]; then
+        if [[ ! -f $root/p66/first-open/first_open_settlement_review.json ]]; then
+            step first_open_review ashare.p66_first_open --root "$root" --panel "$panel" --legacy "$legacy"
+        fi
+        step calendar_audit ashare.p66_calendar --root "$root"
+        step exploratory_accounts ashare.p66_explore run --out "$root/p66/exploratory" \
+            --portfolio "$root/portfolio" --legacy "$legacy" --panel "$panel" --group "$root/group_c" --end "$today"
+        step fund_research ashare.p66_fund_research --root "$root" --panel "$panel" --legacy "$legacy"
+        step daily_research_report ashare.p66_daily_report --root "$root" --legacy "$legacy" \
+            --panel "$panel" --out "$root/p66/daily"
+    fi
 fi
 record "$phase" "EXIT=$result"
 exit "$result"

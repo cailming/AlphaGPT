@@ -9,7 +9,7 @@ import unittest
 
 @unittest.skipUnless(shutil.which("flock"), "Ubuntu schedule uses flock")
 class SchedulerTests(unittest.TestCase):
-    def execute(self, hour, minute, current_panel=False, patch_enabled=False):
+    def execute(self, hour, minute, current_panel=False, patch_enabled=False, research_enabled=False):
         source = Path(__file__).resolve().parents[1]
         script = next(p for p in (source/"ashare/p58_research_schedule.sh", source/"code/p58_research_schedule.sh")
                       if p.exists())
@@ -17,6 +17,9 @@ class SchedulerTests(unittest.TestCase):
             folder = Path(directory)
             root = folder/"reports/p58/run"
             root.mkdir(parents=True)
+            if research_enabled:
+                (root/"p66").mkdir()
+                (root/"p66/schedule.enabled").touch()
             if patch_enabled:
                 (root/"p65/quote-patch-daily").mkdir(parents=True)
             for lane in ("portfolio","group_c"):
@@ -64,6 +67,14 @@ class SchedulerTests(unittest.TestCase):
         self.assertIn("/quote-patch-daily/runs/2026-11-27", calls.splitlines()[-1])
         _, missing_parents = self.execute("18", "10", patch_enabled=True)
         self.assertNotIn("ashare.p65_enhanced_audit", missing_parents)
+
+    def test_research_jobs_follow_existing_jobs_and_report_runs_last(self):
+        status, calls = self.execute("22","10",current_panel=True,research_enabled=True)
+        self.assertEqual(status, 1)  # The simulated fund snapshot fails independently.
+        modules = [line.split()[0] for line in calls.splitlines()]
+        self.assertLess(modules.index("ashare.p6_portfolio_run"), modules.index("ashare.p66_first_open"))
+        self.assertEqual(modules[-4:], ["ashare.p66_calendar","ashare.p66_explore",
+                                       "ashare.p66_fund_research","ashare.p66_daily_report"])
 
 
 if __name__ == "__main__":
