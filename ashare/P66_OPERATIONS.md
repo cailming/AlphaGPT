@@ -24,3 +24,16 @@ bash "$root/mode.sh" ashare.p66_calendar --root "$root"
 原 P5 成熟标签、面板和 P6 持有期程序使用数据库观察到的正式日期推进。发生整日缺行情时，旧逻辑可能推迟 T+6 或持有期退出。新诊断保留该计划日期并显式列缺失日。新研究模块只在有已公布计划时确定开盘与到期日。冻结历史账本沿用其原协议。旧资金快照仅在其已有的 2026 年日历内确认盘前资格。2027 年安排截至本次核验待上交所公布，在核实并适配前保留跨年待更新状态。 [上交所休市公告目录](https://www.sse.com.cn/disclosure/dealinstruc/closed/)
 
 `p66/calendar/YYYY-MM-DD` 每次归档实际观测时钟、逐日股票数、应开缺失日及最新增强模型状态。晚间取现有 P5.8 正式行情监控中的成对覆盖，利用 20 日因子与 16 日序列计算最新条件恢复日。新的失败配对会顺延预计日期，整日缺数也会影响下一交易日配对。11 月 27 日的复算仍得到 12 月 7 日；届时日报和日历审计需核对两个冻结模型的实际数量。 [定向行情核验](P65_MARKET_GAP.md)
+
+## 夜间运行与入口
+
+在 ubuntu92 的原盘后研究脚本中，冻结预测、C 组、严格账户及补丁诊断优先执行。研究根内的 `p66/schedule.enabled` 于北京时间 11 月 28 日 20:45 启用后，脚本依次核对首批成交、日历、探索账户、次开资金因子和统一日报。某个步骤失败会记录自己的退出码，后续步骤继续执行。已归档首批成交验收后，后续盘后任务跳过该专项。同一交易日的独立重试保留预测和账户原档。
+
+`p66/daily/latest/daily_research.md` 是统一入口，同目录含机器可读 JSON、累计 CSV 及散列。以下入口可单独重试。
+
+```sh
+bash "$root/mode.sh" ashare.p66_daily_report --root "$root" --legacy "$legacy" --panel "$panel" --out "$root/p66/daily"
+bash "$root/mode.sh" ashare.p66_fund_research --root "$root" --legacy "$legacy" --panel "$panel"
+```
+
+11 月 28 日复核时，ubuntu92 的 cron 服务为 active，已安装 crontab 与归档副本逐字相同。原 P6.5 的 52 项专项及本轮新增的 31 项测试全部通过。部署后的自动触发与真实成交需等下一正式交易日。 [探索账户](P66_EXPLORATORY.md) · [统一日报](P66_DAILY_REPORT.md) · [资金因子](P66_FUND_RESEARCH.md)
